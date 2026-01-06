@@ -279,6 +279,12 @@ export class ViaPossibilitiesSolver2 extends BaseSolver {
       }
 
       // Determine the Z level to switch to (the one NOT occupied by the intersected segment)
+      if (this.availableZ.length <= 1) {
+        this.error =
+          "Cannot place via for Z level change: only one Z level available"
+        this.failed = true
+        return
+      }
       const nextZ = this.availableZ.find((z) => z !== intersectedSegmentZ)!
       if (nextZ === undefined) {
         this.error = "Could not determine next Z level for via placement!"
