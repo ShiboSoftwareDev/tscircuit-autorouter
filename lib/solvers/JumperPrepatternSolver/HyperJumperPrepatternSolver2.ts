@@ -101,17 +101,17 @@ export class HyperJumperPrepatternSolver2 extends HyperParameterSupervisorSolver
 
     const canUse8x4 = minDimension >= 32 && maxDimension >= 32
 
-    const patternValues: Array<{ PATTERN_TYPE: HyperGraphPatternType }> = [
-      { PATTERN_TYPE: "single_1206x4" },
-    ]
+    const patternValues: Array<{ PATTERN_TYPE: HyperGraphPatternType }> = []
+
+    if (canUse2x2) {
+      patternValues.push({ PATTERN_TYPE: "2x2_1206x4" })
+    }
 
     if (canUse1x2) {
       patternValues.push({ PATTERN_TYPE: "1x2_1206x4" })
     }
 
-    if (canUse2x2) {
-      patternValues.push({ PATTERN_TYPE: "2x2_1206x4" })
-    }
+    patternValues.push({ PATTERN_TYPE: "single_1206x4" })
 
     if (canUse3x1) {
       patternValues.push({ PATTERN_TYPE: "3x1_1206x4" })
@@ -173,7 +173,54 @@ export class HyperJumperPrepatternSolver2 extends HyperParameterSupervisorSolver
 
   computeG(solver: JumperPrepatternSolver2_HyperGraph): number {
     // Prefer solutions with fewer iterations
-    return solver.iterations / 10000
+    let score = solver.iterations / 10000
+
+    // Penalize routes with unnecessary u-turn patterns (significant direction changes)
+    for (const route of solver.solvedRoutes) {
+      const points = route.route
+      let directionChanges = 0
+      let totalDetourDistance = 0
+
+      // Analyze the route for inefficient patterns
+      for (let i = 1; i < points.length - 1; i++) {
+        const prev = points[i - 1]
+        const curr = points[i]
+        const next = points[i + 1]
+
+        const prevDx = curr.x - prev.x
+        const prevDy = curr.y - prev.y
+        const nextDx = next.x - curr.x
+        const nextDy = next.y - curr.y
+
+        // Calculate direction vectors
+        const prevAngle = Math.atan2(prevDy, prevDx)
+        const nextAngle = Math.atan2(nextDy, nextDx)
+
+        // Check for significant direction changes (> 90 degrees)
+        const angleDiff = Math.abs(nextAngle - prevAngle)
+        const normalizedAngleDiff = Math.min(angleDiff, 2 * Math.PI - angleDiff)
+
+        if (normalizedAngleDiff > Math.PI / 2) {
+          // > 90 degrees
+          directionChanges++
+
+          // Penalize sharp turns that create detours
+          const detourMagnitude = Math.sqrt(nextDx * nextDx + nextDy * nextDy)
+          totalDetourDistance += detourMagnitude
+        }
+      }
+
+      // Penalize routes with too many direction changes or excessive detour distance
+      if (directionChanges > 2) {
+        score += directionChanges * 10
+      }
+      if (totalDetourDistance > points.length * 0.5) {
+        // Detour distance > 0.5mm per point
+        score += totalDetourDistance * 20
+      }
+    }
+
+    return score
   }
 
   computeH(solver: JumperPrepatternSolver2_HyperGraph): number {
