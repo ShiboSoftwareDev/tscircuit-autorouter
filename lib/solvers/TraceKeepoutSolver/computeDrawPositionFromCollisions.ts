@@ -15,6 +15,8 @@ export interface ComputeDrawPositionInput {
   lastCursorPosition: Point2D
   collidingSegments: Segment[]
   keepoutRadius: number
+  /** Previous draw position - used to prefer continuing in the same direction */
+  lastDrawPosition?: Point2D
 }
 
 /**
@@ -139,6 +141,7 @@ export function computeDrawPositionFromCollisions(
     lastCursorPosition,
     collidingSegments,
     keepoutRadius,
+    lastDrawPosition,
   } = input
   if (collidingSegments.length === 0) return null
 
@@ -154,6 +157,18 @@ export function computeDrawPositionFromCollisions(
   // Barrier direction (perpendicular to trace)
   const barrierDir = { x: -traceDir.y, y: traceDir.x }
 
+  // Determine preferred direction based on where last draw position was
+  // relative to the cursor (positive = same side as lastDrawPosition)
+  let preferPositive = true
+  if (lastDrawPosition) {
+    const drawOffsetX = lastDrawPosition.x - cursorPosition.x
+    const drawOffsetY = lastDrawPosition.y - cursorPosition.y
+    // Project the draw offset onto the barrier direction
+    const projectedOffset =
+      drawOffsetX * barrierDir.x + drawOffsetY * barrierDir.y
+    preferPositive = projectedOffset >= 0
+  }
+
   // Check if cursor position itself is valid
   const cursorClearance = getMinClearance({
     pos: cursorPosition,
@@ -161,6 +176,7 @@ export function computeDrawPositionFromCollisions(
     dir: traceDir,
     keepoutRadius,
   })
+
   if (cursorClearance >= keepoutRadius) {
     return null // No adjustment needed
   }
@@ -219,7 +235,16 @@ export function computeDrawPositionFromCollisions(
   // Strategy: Search outward from cursor in both directions, find the first
   // local maximum in each direction, then pick the better one.
   // Only consider reachable positions (paths that don't cross segments).
-  const searchRange = keepoutRadius
+  //
+  // If we have a previous draw position, extend search range to cover it
+  let searchRange = keepoutRadius
+  if (lastDrawPosition) {
+    const dx = lastDrawPosition.x - cursorPosition.x
+    const dy = lastDrawPosition.y - cursorPosition.y
+    const prevDrawDist = Math.sqrt(dx * dx + dy * dy)
+    // Extend search range to at least cover where we were, plus some margin
+    searchRange = Math.max(searchRange, prevDrawDist * 1.2)
+  }
   const searchSteps = 60
 
   // Sample clearance at each position
@@ -262,11 +287,17 @@ export function computeDrawPositionFromCollisions(
 
   // Search ALL samples to find local maxima in both directions
   // This ensures we find gaps even if path to them crosses segments
+  // Also track the best sample in each direction for fallback
   let posMax: (typeof samples)[0] | null = null
+  let posBest: (typeof samples)[0] | null = null
   for (let i = actualCenterIdx + 1; i < samples.length - 1; i++) {
     const prev = samples[i - 1]!
     const curr = samples[i]!
     const next = samples[i + 1]!
+
+    if (!posBest || curr.clearance > posBest.clearance) {
+      posBest = curr
+    }
 
     if (curr.clearance >= prev.clearance && curr.clearance >= next.clearance) {
       posMax = curr
@@ -275,14 +306,36 @@ export function computeDrawPositionFromCollisions(
   }
 
   let negMax: (typeof samples)[0] | null = null
+  let negBest: (typeof samples)[0] | null = null
   for (let i = actualCenterIdx - 1; i > 0; i--) {
     const prev = samples[i - 1]!
     const curr = samples[i]!
     const next = samples[i + 1]!
 
+    if (!negBest || curr.clearance > negBest.clearance) {
+      negBest = curr
+    }
+
     if (curr.clearance >= prev.clearance && curr.clearance >= next.clearance) {
       negMax = curr
       break // Take the first (closest) local max
+    }
+  }
+
+  // If no local max found but one direction has much better clearance than the other,
+  // use the best sample from the better direction
+  const centerSampleClearance =
+    samples.find((s) => s.index === 0)?.clearance ?? 0
+  if (!posMax && posBest && posBest.clearance > centerSampleClearance) {
+    // Positive direction has better clearance than center, use it
+    if (!negMax || posBest.clearance > (negMax.clearance ?? 0)) {
+      posMax = posBest
+    }
+  }
+  if (!negMax && negBest && negBest.clearance > centerSampleClearance) {
+    // Negative direction has better clearance than center, use it
+    if (!posMax || negBest.clearance > (posMax.clearance ?? 0)) {
+      negMax = negBest
     }
   }
 
@@ -372,13 +425,72 @@ export function computeDrawPositionFromCollisions(
   //   to avoid crossing segments unnecessarily
   const cursorTrapped = cursorClearance < keepoutRadius * 0.15
 
+  // Helper to check if a candidate is in the preferred direction AND
+  // at least as far from cursor as our previous draw position was
+  const getDistFromCursor = (c: (typeof candidates)[0]) => {
+    const dx = c.pos.x - cursorPosition.x
+    const dy = c.pos.y - cursorPosition.y
+    return dx * barrierDir.x + dy * barrierDir.y // signed distance along barrier
+  }
+
+  // Calculate how far the previous draw was from current cursor
+  let prevDrawOffset = 0
+  if (lastDrawPosition) {
+    const dx = lastDrawPosition.x - cursorPosition.x
+    const dy = lastDrawPosition.y - cursorPosition.y
+    prevDrawOffset = dx * barrierDir.x + dy * barrierDir.y
+  }
+
   let bestMax: (typeof candidates)[0]
   if (cursorTrapped) {
-    // Trapped - pick best clearance regardless of reachability
-    bestMax = candidates[0]!
-    for (const c of candidates) {
-      if (c.clearance > bestMax.clearance) {
-        bestMax = c
+    // Trapped - if we were displaced before, try to stay at least that displaced
+    // Look for candidates that maintain our previous offset (or close to it)
+
+    // Find candidates that are at least 80% of the way towards where we were
+    const minAcceptableOffset = prevDrawOffset * 0.8
+    const candidatesInPreferredRegion = candidates.filter((c) => {
+      const dist = getDistFromCursor(c)
+      // If we were in positive direction, stay positive and at least near where we were
+      // If we were in negative direction, stay negative and at least near where we were
+      if (preferPositive) {
+        return dist >= minAcceptableOffset
+      } else {
+        return dist <= minAcceptableOffset
+      }
+    })
+
+    // If we have candidates in the preferred region, pick the one with best clearance
+    if (candidatesInPreferredRegion.length > 0) {
+      bestMax = candidatesInPreferredRegion[0]!
+      for (const c of candidatesInPreferredRegion) {
+        if (c.clearance > bestMax.clearance) {
+          bestMax = c
+        }
+      }
+    } else {
+      // No candidates in preferred region - prefer candidates in the preferred direction
+      // even if they don't meet the strict offset threshold
+      const candidatesInPreferredDirection = candidates.filter((c) => {
+        const dist = getDistFromCursor(c)
+        return preferPositive ? dist >= 0 : dist <= 0
+      })
+
+      if (candidatesInPreferredDirection.length > 0) {
+        // Pick the best candidate in the preferred direction
+        bestMax = candidatesInPreferredDirection[0]!
+        for (const c of candidatesInPreferredDirection) {
+          if (c.clearance > bestMax.clearance) {
+            bestMax = c
+          }
+        }
+      } else {
+        // No candidates in preferred direction - fall back to best overall
+        bestMax = candidates[0]!
+        for (const c of candidates) {
+          if (c.clearance > bestMax.clearance) {
+            bestMax = c
+          }
+        }
       }
     }
   } else {
@@ -399,6 +511,13 @@ export function computeDrawPositionFromCollisions(
     (bestMax.pos.x - cursorPosition.x) ** 2 +
       (bestMax.pos.y - cursorPosition.y) ** 2,
   )
+
+  // When cursor is trapped, always return a position to escape the trap
+  // even if movedDist is very small
+  if (cursorTrapped) {
+    return bestMax.pos
+  }
+
   return movedDist > epsilon ? bestMax.pos : null
 }
 /**

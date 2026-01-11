@@ -357,12 +357,17 @@ export class TraceKeepoutSolver extends BaseSolver {
     const collidingSegments = this.getCollidingSegments(this.cursorPosition!)
     this.lastCollidingSegments = collidingSegments
 
+    // Get the last recorded draw position for direction preference
+    const lastRecordedDraw =
+      this.recordedDrawPositions[this.recordedDrawPositions.length - 1]
+
     // Compute draw position using the collision avoidance algorithm
     const newDrawPosition = computeDrawPositionFromCollisions({
       cursorPosition: this.cursorPosition!,
       lastCursorPosition: this.lastCursorPosition!,
       collidingSegments,
       keepoutRadius: this.currentKeepoutRadius,
+      lastDrawPosition: lastRecordedDraw,
     })
 
     this.drawPosition = newDrawPosition ?? { ...this.cursorPosition! }
