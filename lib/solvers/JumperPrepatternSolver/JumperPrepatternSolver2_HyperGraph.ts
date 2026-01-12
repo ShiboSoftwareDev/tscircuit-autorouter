@@ -18,29 +18,21 @@ import {
   generateJumperX4Grid,
   createGraphWithConnectionsFromBaseGraph,
   type JRegion,
+  type JPort,
 } from "@tscircuit/hypergraph"
-import { areSegmentsCollinear } from "./areSegmentsCollinear"
-import { getCollinearOverlapInfo } from "./getCollinearOverlapInfo"
-import { computeOffsetMidpoint } from "./computeOffsetMidpoint"
-import { createRegionOffsetPoints } from "./createRegionOffsetPoints"
-import { doBoundsOverlap, doSegmentsIntersect } from "@tscircuit/math-utils"
+import { CurvyTraceSolver } from "@tscircuit/curvy-trace-solver"
+import type {
+  CurvyTraceProblem,
+  Obstacle as CurvyObstacle,
+} from "@tscircuit/curvy-trace-solver"
 
 export type Point2D = { x: number; y: number }
 
-export type HyperGraphPatternType =
-  | "single_1206x4"
-  | "1x2_1206x4"
-  | "2x2_1206x4"
-  | "3x1_1206x4"
-  | "3x2_1206x4"
-  | "3x3_1206x4"
-  | "4x4_1206x4"
-  | "6x4_1206x4"
-  | "8x4_1206x4"
-
 export interface JumperPrepatternSolver2HyperParameters {
-  /** Pattern type for jumper placement - "single_1206x4" (~8x8mm) or "2x2_1206x4" (~14x14mm) */
-  PATTERN_TYPE?: HyperGraphPatternType
+  /** Number of columns in the jumper grid */
+  COLS?: number
+  /** Number of rows in the jumper grid */
+  ROWS?: number
   /** Orientation of jumpers - "horizontal" or "vertical" */
   ORIENTATION?: "horizontal" | "vertical"
 }
@@ -92,6 +84,45 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
   // SRJ Jumpers with obstacles (populated after solving)
   jumpers: SrjJumper[] = []
 
+  // Phase tracking for multi-step solving
+  phase: "jumperGraph" | "curvyTrace" | "done" = "jumperGraph"
+
+  // Curvy trace solver state (populated after jumperGraph phase completes)
+  curvySolvers: Array<{
+    solver: CurvyTraceSolver
+    regionId: string
+    traversals: Array<{
+      routeIndex: number
+      connectionName: string
+      rootConnectionName?: string
+    }>
+  }> = []
+  currentCurvySolverIndex = 0
+  routeInfos: Array<{
+    connectionId: string
+    rootConnectionName?: string
+    jumpers: Jumper[]
+    traversals: Array<{
+      regionId: string
+      region: JRegion
+      entryPort: JPort
+      exitPort: JPort | null
+    }>
+  }> = []
+  // Stores curved paths per region and networkId
+  // Each (regionId, networkId) pair can have multiple paths if the route traverses the region multiple times
+  regionCurvedPaths: Map<
+    string,
+    Map<
+      string,
+      Array<{
+        path: Array<{ x: number; y: number }>
+        start: { x: number; y: number }
+        end: { x: number; y: number }
+      }>
+    >
+  > = new Map()
+
   constructor(params: JumperPrepatternSolver2Params) {
     super()
     this.constructorParams = params
@@ -138,32 +169,10 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
   }
 
   private _getPatternConfig(): { cols: number; rows: number } {
-    const patternType = this.hyperParameters.PATTERN_TYPE ?? "single_1206x4"
-    if (patternType === "8x4_1206x4") {
-      return { cols: 8, rows: 4 }
+    return {
+      cols: this.hyperParameters.COLS ?? 1,
+      rows: this.hyperParameters.ROWS ?? 1,
     }
-    if (patternType === "6x4_1206x4") {
-      return { cols: 6, rows: 4 }
-    }
-    if (patternType === "4x4_1206x4") {
-      return { cols: 4, rows: 4 }
-    }
-    if (patternType === "3x3_1206x4") {
-      return { cols: 3, rows: 3 }
-    }
-    if (patternType === "3x2_1206x4") {
-      return { cols: 3, rows: 2 }
-    }
-    if (patternType === "3x1_1206x4") {
-      return { cols: 3, rows: 1 }
-    }
-    if (patternType === "2x2_1206x4") {
-      return { cols: 2, rows: 2 }
-    }
-    if (patternType === "1x2_1206x4") {
-      return { cols: 1, rows: 2 }
-    }
-    return { cols: 1, rows: 1 }
   }
 
   private _initializeGraph(): boolean {
@@ -203,29 +212,30 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
     if (baseGraph.regions.length > 0) {
       // TODO import calculateGraphBounds from @tscircuit/hypergraph (when
       // exported)
-      let bgMinX = Infinity
-      let bgMaxX = -Infinity
-      let bgMinY = Infinity
-      let bgMaxY = -Infinity
+      let padMinX = Infinity
+      let padMaxX = -Infinity
+      let padMinY = Infinity
+      let padMaxY = -Infinity
       for (const region of baseGraph.regions) {
+        if (!region.d?.isPad) continue
         const bounds = region.d?.bounds
         if (bounds) {
-          bgMinX = Math.min(bgMinX, bounds.minX)
-          bgMaxX = Math.max(bgMaxX, bounds.maxX)
-          bgMinY = Math.min(bgMinY, bounds.minY)
-          bgMaxY = Math.max(bgMaxY, bounds.maxY)
+          padMinX = Math.min(padMinX, bounds.minX)
+          padMaxX = Math.max(padMaxX, bounds.maxX)
+          padMinY = Math.min(padMinY, bounds.minY)
+          padMaxY = Math.max(padMaxY, bounds.maxY)
         }
       }
 
-      const margin = 0.4
+      const paddingAroundPads = 1
 
       if (
-        bgMinX < nodeBounds.minX - margin ||
-        bgMaxX > nodeBounds.maxX + margin ||
-        bgMinY < nodeBounds.minY - margin ||
-        bgMaxY > nodeBounds.maxY + margin
+        padMinX - paddingAroundPads < nodeBounds.minX ||
+        padMaxX + paddingAroundPads > nodeBounds.maxX ||
+        padMinY - paddingAroundPads < nodeBounds.minY ||
+        padMaxY + paddingAroundPads > nodeBounds.maxY
       ) {
-        this.error = `baseGraph bounds (${bgMinX.toFixed(2)}, ${bgMinY.toFixed(2)}, ${bgMaxX.toFixed(2)}, ${bgMaxY.toFixed(2)}) exceed node bounds (${nodeBounds.minX.toFixed(2)}, ${nodeBounds.minY.toFixed(2)}, ${nodeBounds.maxX.toFixed(2)}, ${nodeBounds.maxY.toFixed(2)})`
+        this.error = `baseGraph bounds (${padMinX.toFixed(2)}, ${padMinY.toFixed(2)}, ${padMaxX.toFixed(2)}, ${padMaxY.toFixed(2)}) exceed node bounds (${nodeBounds.minX.toFixed(2)}, ${nodeBounds.minY.toFixed(2)}, ${nodeBounds.maxX.toFixed(2)}, ${nodeBounds.maxY.toFixed(2)})`
         this.failed = true
         return false
       }
@@ -295,89 +305,289 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
   }
 
   _step() {
+    switch (this.phase) {
+      case "jumperGraph":
+        this._stepJumperGraph()
+        break
+      case "curvyTrace":
+        this._stepCurvyTrace()
+        break
+      case "done":
+        this.solved = true
+        break
+    }
+  }
+
+  private _stepJumperGraph() {
     // Initialize on first step
     if (!this.jumperGraphSolver) {
       this._initializeGraph()
       if (this.solved) return
       if (!this.jumperGraphSolver) {
-        this.error = "Failed to initialize hypergraph solver"
         this.failed = true
         return
       }
     }
 
+    // Set activeSubSolver so visualizations show the jumper graph solver
+    this.activeSubSolver = this.jumperGraphSolver
+
     // Step the internal solver
     this.jumperGraphSolver.step()
 
     if (this.jumperGraphSolver.solved) {
-      this._processResults()
-      this._addMidpointsForCollinearOverlaps()
-      this.solved = true
+      // Initialize curvy trace solvers for the next phase
+      this._initializeCurvyTraceSolvers()
+      if (this.curvySolvers.length > 0) {
+        this.phase = "curvyTrace"
+      } else {
+        // No curvy solvers needed, finalize immediately
+        this._finalizeCurvyTraceResults()
+        this.phase = "done"
+        this.solved = true
+      }
     } else if (this.jumperGraphSolver.failed) {
       this.error = this.jumperGraphSolver.error
       this.failed = true
     }
   }
 
-  private _processResults() {
-    if (!this.jumperGraphSolver) return
+  private _stepCurvyTrace() {
+    if (this.currentCurvySolverIndex >= this.curvySolvers.length) {
+      // All curvy solvers done, finalize
+      this._finalizeCurvyTraceResults()
+      this.phase = "done"
+      this.solved = true
+      return
+    }
 
-    // Offset distance to push points slightly inside regions (mm)
-    // This helps subsequent force-directed solvers understand segment lies within region
-    const OFFSET_POINT_INSIDE_REGION = 0.02
+    const currentSolverInfo = this.curvySolvers[this.currentCurvySolverIndex]
+    const solver = currentSolverInfo.solver
+
+    // Set activeSubSolver so visualizations show the curvy trace solver
+    this.activeSubSolver = solver
+
+    // Step the current curvy solver
+    solver.step()
+
+    if (solver.solved) {
+      // Store the curved paths from this solver
+      const regionId = currentSolverInfo.regionId
+      if (!this.regionCurvedPaths.has(regionId)) {
+        this.regionCurvedPaths.set(regionId, new Map())
+      }
+
+      for (const outputTrace of solver.outputTraces) {
+        const networkId = outputTrace.networkId ?? ""
+        const points = outputTrace.points.map((p) => ({ x: p.x, y: p.y }))
+
+        // Store path with start/end points for matching during reconstruction
+        const pathEntry = {
+          path: points,
+          start: points[0] ?? { x: 0, y: 0 },
+          end: points[points.length - 1] ?? { x: 0, y: 0 },
+        }
+
+        // Append to array (don't overwrite) since a route can traverse the same region multiple times
+        if (!this.regionCurvedPaths.get(regionId)!.has(networkId)) {
+          this.regionCurvedPaths.get(regionId)!.set(networkId, [])
+        }
+        this.regionCurvedPaths.get(regionId)!.get(networkId)!.push(pathEntry)
+      }
+
+      // Move to next solver
+      this.currentCurvySolverIndex++
+    } else if (solver.failed) {
+      // Curvy solver failed, but we can continue with straight lines
+      // Just move to the next solver
+      this.currentCurvySolverIndex++
+    }
+  }
+
+  /**
+   * Initialize CurvyTraceSolvers for each routing region.
+   * Called after JumperGraphSolver completes to set up the curvy trace phase.
+   */
+  private _initializeCurvyTraceSolvers() {
+    if (!this.jumperGraphSolver) return
 
     // Track which throughjumpers have been used to avoid duplicates
     const usedThroughJumpers = new Set<string>()
 
-    // Convert solved routes from HyperGraph format to HighDensityIntraNodeRouteWithJumpers
-    for (const solvedRoute of this.jumperGraphSolver.solvedRoutes) {
-      const connectionId = solvedRoute.connection.connectionId
-
-      // Extract route points from the solved path
-      const routePoints: Array<{
-        x: number
-        y: number
-        z: number
-        insideJumperPad?: boolean
-      }> = []
-      const jumpers: Jumper[] = []
-
-      for (const candidate of solvedRoute.path) {
-        const port = candidate.port
-        const r1 = port.region1 as any
-        const r2 = port.region2 as any
-        const lastRegion = candidate.lastRegion as any
-
-        // Create two offset points entering each adjacent region
-        const offsetPoints = createRegionOffsetPoints({
-          baseX: port.d.x,
-          baseY: port.d.y,
-          r1Center: r1?.d?.center,
-          r2Center: r2?.d?.center,
-          cameFromRegion1: lastRegion?.regionId === r1?.regionId,
-          insideJumperPad: Boolean(r1?.d.isPad || r2?.d.isPad),
-          offsetDistance: OFFSET_POINT_INSIDE_REGION,
+    // Build base obstacle info from all jumper pad locations
+    // We'll set networkIds later based on which routes use each pad
+    type PadObstacleInfo = {
+      minX: number
+      minY: number
+      maxX: number
+      maxY: number
+      center: { x: number; y: number }
+      networkIds: string[] // Routes that connect to this pad
+    }
+    const padObstacleInfos: PadObstacleInfo[] = []
+    for (const jumperLoc of this.jumperLocations) {
+      for (const padRegion of jumperLoc.padRegions) {
+        const padBounds = padRegion.d.bounds
+        const padCenter = padRegion.d.center
+        padObstacleInfos.push({
+          minX: padBounds.minX,
+          minY: padBounds.minY,
+          maxX: padBounds.maxX,
+          maxY: padBounds.maxY,
+          center: { x: padCenter.x, y: padCenter.y },
+          networkIds: [],
         })
-        routePoints.push(...offsetPoints)
+      }
+    }
 
-        // Check if we crossed through a jumper (lastRegion is a throughjumper)
-        const region = candidate.lastRegion as any
+    // Collect region traversals for all routes, grouped by region
+    // Each region may have multiple routes passing through it
+    type RegionTraversal = {
+      regionId: string
+      region: JRegion
+      routeIndex: number
+      connectionName: string
+      rootConnectionName?: string
+      entryPort: JPort
+      exitPort: JPort
+    }
+    const regionTraversals: Map<string, RegionTraversal[]> = new Map()
+
+    // First pass: collect region traversals and jumper info for each route
+    for (
+      let routeIdx = 0;
+      routeIdx < this.jumperGraphSolver.solvedRoutes.length;
+      routeIdx++
+    ) {
+      const solvedRoute = this.jumperGraphSolver.solvedRoutes[routeIdx]
+      const connectionId = solvedRoute.connection.connectionId
+      const rootConnectionName = this.nodeWithPortPoints.portPoints.find(
+        (pp) => pp.connectionName === connectionId,
+      )?.rootConnectionName
+      const jumpers: Jumper[] = []
+      const traversals: Array<{
+        regionId: string
+        region: JRegion
+        entryPort: JPort
+        exitPort: JPort | null
+      }> = []
+
+      // Track current region and entry port
+      let currentRegion: JRegion | null = null
+      let currentEntryPort: JPort | null = null
+
+      for (let i = 0; i < solvedRoute.path.length; i++) {
+        const candidate = solvedRoute.path[i]
+        const port = candidate.port as JPort
+        const lastRegion = candidate.lastRegion as JRegion | undefined
+
+        // Determine which region we're entering based on the port's connected regions
+        // Each port connects two regions (region1 and region2)
+        // We enter the region that is NOT the lastRegion
+        const r1 = (port as any).region1 as JRegion | undefined
+        const r2 = (port as any).region2 as JRegion | undefined
+        let nextRegion: JRegion | undefined
+
+        if (lastRegion) {
+          // Entering the region that's not the one we came from
+          if (r1 && r1.regionId !== lastRegion.regionId) {
+            nextRegion = r1
+          } else if (r2 && r2.regionId !== lastRegion.regionId) {
+            nextRegion = r2
+          }
+        } else {
+          // First port - look ahead to find which region we're entering
+          // The next port's lastRegion tells us which region we're actually traversing
+          const nextCandidate = solvedRoute.path[i + 1]
+          const nextLastRegion = nextCandidate?.lastRegion as
+            | JRegion
+            | undefined
+
+          if (nextLastRegion) {
+            // Pick the region that matches what we'll be coming from at the next port
+            if (r1 && r1.regionId === nextLastRegion.regionId) {
+              nextRegion = r1
+            } else if (r2 && r2.regionId === nextLastRegion.regionId) {
+              nextRegion = r2
+            }
+          }
+
+          // Fallback: prefer non-connection regions over conn:* pseudo-regions
+          if (!nextRegion) {
+            const isConnRegion = (r: JRegion | undefined) =>
+              r?.regionId?.startsWith("conn:")
+            if (
+              r1 &&
+              !isConnRegion(r1) &&
+              !r1.d?.isPad &&
+              !r1.d?.isThroughJumper
+            ) {
+              nextRegion = r1
+            } else if (
+              r2 &&
+              !isConnRegion(r2) &&
+              !r2.d?.isPad &&
+              !r2.d?.isThroughJumper
+            ) {
+              nextRegion = r2
+            } else if (r1 && !r1.d?.isPad && !r1.d?.isThroughJumper) {
+              nextRegion = r1
+            } else if (r2 && !r2.d?.isPad && !r2.d?.isThroughJumper) {
+              nextRegion = r2
+            } else {
+              nextRegion = r1 || r2
+            }
+          }
+        }
+
+        // Check if we're entering a new region
         if (
-          region?.d?.isThroughJumper &&
-          !usedThroughJumpers.has(region.regionId)
+          nextRegion &&
+          (!currentRegion || nextRegion.regionId !== currentRegion.regionId)
         ) {
-          usedThroughJumpers.add(region.regionId)
+          // If we were in a region, record the exit
+          if (currentRegion && currentEntryPort) {
+            traversals.push({
+              regionId: currentRegion.regionId,
+              region: currentRegion,
+              entryPort: currentEntryPort,
+              exitPort: port,
+            })
 
-          // Use the throughjumper region's bounds to get the correct pad positions
-          // Determine orientation from bounds - if width > height, it's horizontal
-          const bounds = region.d.bounds
-          const center = region.d.center
+            // Add to global traversals map
+            const key = currentRegion.regionId
+            if (!regionTraversals.has(key)) {
+              regionTraversals.set(key, [])
+            }
+            regionTraversals.get(key)!.push({
+              regionId: currentRegion.regionId,
+              region: currentRegion,
+              routeIndex: routeIdx,
+              connectionName: connectionId,
+              rootConnectionName,
+              entryPort: currentEntryPort,
+              exitPort: port,
+            })
+          }
+
+          // Start tracking the new region
+          currentRegion = nextRegion
+          currentEntryPort = port
+        }
+
+        // Track jumpers
+        if (
+          lastRegion?.d?.isThroughJumper &&
+          !usedThroughJumpers.has(lastRegion.regionId)
+        ) {
+          usedThroughJumpers.add(lastRegion.regionId)
+          const bounds = lastRegion.d.bounds
+          const center = lastRegion.d.center
           const boundsWidth = bounds.maxX - bounds.minX
           const boundsHeight = bounds.maxY - bounds.minY
           const isHorizontal = boundsWidth > boundsHeight
 
           if (isHorizontal) {
-            // Horizontal jumper: pads are on left (minX) and right (maxX), same Y
             jumpers.push({
               route_type: "jumper",
               start: { x: bounds.minX, y: center.y },
@@ -385,7 +595,6 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
               footprint: "1206x4_pair",
             })
           } else {
-            // Vertical jumper: pads are on bottom (minY) and top (maxY), same X
             jumpers.push({
               route_type: "jumper",
               start: { x: center.x, y: bounds.minY },
@@ -396,202 +605,215 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
         }
       }
 
-      // Find the root connection name from our input
-      const rootConnectionName = this.nodeWithPortPoints.portPoints.find(
-        (pp) => pp.connectionName === connectionId,
-      )?.rootConnectionName
+      // Handle the last region
+      if (currentRegion && currentEntryPort) {
+        const lastCandidate = solvedRoute.path[solvedRoute.path.length - 1]
+        traversals.push({
+          regionId: currentRegion.regionId,
+          region: currentRegion,
+          entryPort: currentEntryPort,
+          exitPort: (lastCandidate?.port as JPort) || null,
+        })
+      }
 
-      this.solvedRoutes.push({
-        connectionName: connectionId,
+      this.routeInfos.push({
+        connectionId,
         rootConnectionName,
-        traceThickness: this.traceWidth,
-        route: routePoints,
         jumpers,
+        traversals,
+      })
+    }
+
+    // Populate networkIds on pad obstacles based on which routes use which jumper pads
+    // A route uses a pad if one of its jumpers has start/end at that pad's center
+    const POSITION_TOLERANCE = 0.1
+    for (let routeIdx = 0; routeIdx < this.routeInfos.length; routeIdx++) {
+      const routeInfo = this.routeInfos[routeIdx]
+      const networkId = routeInfo.rootConnectionName ?? routeInfo.connectionId
+
+      for (const jumper of routeInfo.jumpers) {
+        // Check both start and end positions of the jumper
+        const jumperPositions = [jumper.start, jumper.end]
+
+        for (const pos of jumperPositions) {
+          // Find the pad obstacle that matches this position
+          for (const padInfo of padObstacleInfos) {
+            const dx = Math.abs(padInfo.center.x - pos.x)
+            const dy = Math.abs(padInfo.center.y - pos.y)
+            if (dx < POSITION_TOLERANCE && dy < POSITION_TOLERANCE) {
+              // This pad is used by this route
+              if (!padInfo.networkIds.includes(networkId)) {
+                padInfo.networkIds.push(networkId)
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Create CurvyTraceSolvers for each non-pad region
+    for (const [regionId, traversals] of regionTraversals) {
+      if (traversals.length === 0) continue
+
+      const region = traversals[0].region
+      // Skip pad regions and through-jumper regions - these should stay as straight lines
+      if (region.d.isPad || region.d.isThroughJumper) continue
+
+      const bounds = region.d.bounds
+
+      // Create waypoint pairs for all routes passing through this region
+      const waypointPairs: CurvyTraceProblem["waypointPairs"] = []
+      for (const traversal of traversals) {
+        waypointPairs.push({
+          start: { x: traversal.entryPort.d.x, y: traversal.entryPort.d.y },
+          end: { x: traversal.exitPort.d.x, y: traversal.exitPort.d.y },
+          networkId: traversal.rootConnectionName ?? traversal.connectionName,
+        })
+      }
+
+      // Build obstacles for this region with proper networkIds
+      // Filter to pads that overlap or are adjacent to this region's bounds
+      // Use a small margin to catch pads that touch the region boundary
+      const padMargin = 0.01
+      const regionObstacles: CurvyObstacle[] = padObstacleInfos
+        .filter(
+          (padInfo) =>
+            padInfo.minX <= bounds.maxX + padMargin &&
+            padInfo.maxX >= bounds.minX - padMargin &&
+            padInfo.minY <= bounds.maxY + padMargin &&
+            padInfo.maxY >= bounds.minY - padMargin,
+        )
+        .map((padInfo) => {
+          // If any of the routes passing through this region connect to this pad,
+          // set the networkId so CurvyTraceSolver knows they can connect
+          const routeNetworkIds = traversals.map(
+            (t) => t.rootConnectionName ?? t.connectionName,
+          )
+          const matchingNetworkId = padInfo.networkIds.find((nid) =>
+            routeNetworkIds.includes(nid),
+          )
+
+          return {
+            minX: padInfo.minX,
+            minY: padInfo.minY,
+            maxX: padInfo.maxX,
+            maxY: padInfo.maxY,
+            center: padInfo.center,
+            networkId: matchingNetworkId,
+          }
+        })
+
+      // Create CurvyTraceSolver for this region (don't solve yet)
+      const problem: CurvyTraceProblem = {
+        bounds,
+        waypointPairs,
+        obstacles: regionObstacles,
+        preferredTraceToTraceSpacing: this.traceWidth * 2,
+        preferredObstacleToTraceSpacing: this.traceWidth * 2,
+      }
+
+      const curvySolver = new CurvyTraceSolver(problem)
+
+      this.curvySolvers.push({
+        solver: curvySolver,
+        regionId,
+        traversals: traversals.map((t) => ({
+          routeIndex: t.routeIndex,
+          connectionName: t.connectionName,
+          rootConnectionName: t.rootConnectionName,
+        })),
       })
     }
   }
 
   /**
-   * Post-process routes to add offset midpoints for collinear overlapping segments.
-   *
-   * When two segments are collinear and overlap (arranged as A-C-D-B where AB
-   * is one segment and CD is another), the outer segment (AB) needs a midpoint
-   * pushed to the side to hint to the force-directed graph that it should route
-   * around the inner segment.
-   *
-   * This handles both:
-   * 1. Segments from different connections that overlap
-   * 2. Segments from the SAME connection that overlap (when a route doubles back)
+   * Finalize results after all CurvyTraceSolvers have completed.
+   * Assembles final routes using curved paths where available.
    */
-  private _addMidpointsForCollinearOverlaps() {
-    // Offset distance for the midpoint (mm) - should be enough to hint direction
-    const OFFSET_DISTANCE = 0.5
+  private _finalizeCurvyTraceResults() {
+    // Helper to find distance between two points
+    const dist = (p1: { x: number; y: number }, p2: { x: number; y: number }) =>
+      Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
 
-    // Collect all segments from all routes
-    type RouteSegment = {
-      routeIndex: number
-      segmentIndex: number
-      start: Point2D
-      end: Point2D
-      connectionName: string
-      isInsideJumperPad: boolean
-    }
+    // Build final routes using curved paths where available
+    for (let routeIdx = 0; routeIdx < this.routeInfos.length; routeIdx++) {
+      const routeInfo = this.routeInfos[routeIdx]
+      const routePoints: Array<{ x: number; y: number; z: number }> = []
 
-    const allSegments: RouteSegment[] = []
+      for (const traversal of routeInfo.traversals) {
+        const regionId = traversal.regionId
+        const networkId = routeInfo.rootConnectionName ?? routeInfo.connectionId
 
-    for (let routeIdx = 0; routeIdx < this.solvedRoutes.length; routeIdx++) {
-      const route = this.solvedRoutes[routeIdx]
-      for (let i = 0; i < route.route.length - 1; i++) {
-        const p1 = route.route[i] as {
-          x: number
-          y: number
-          z: number
-          insideJumperPad?: boolean
-        }
-        const p2 = route.route[i + 1] as {
-          x: number
-          y: number
-          z: number
-          insideJumperPad?: boolean
-        }
+        // Check if we have curved paths for this region and networkId
+        const curvedPaths = this.regionCurvedPaths.get(regionId)?.get(networkId)
 
-        // Track whether this segment is inside jumper pads
-        const isInsideJumperPad = Boolean(
-          p1.insideJumperPad && p2.insideJumperPad,
-        )
+        // Find the curved path that matches this traversal's entry/exit points
+        let matchedPath: Array<{ x: number; y: number }> | null = null
+        if (curvedPaths && curvedPaths.length > 0) {
+          const entryPoint = {
+            x: traversal.entryPort.d.x,
+            y: traversal.entryPort.d.y,
+          }
+          const exitPoint = traversal.exitPort
+            ? { x: traversal.exitPort.d.x, y: traversal.exitPort.d.y }
+            : null
 
-        allSegments.push({
-          routeIndex: routeIdx,
-          segmentIndex: i,
-          start: { x: p1.x, y: p1.y },
-          end: { x: p2.x, y: p2.y },
-          connectionName: route.connectionName,
-          isInsideJumperPad,
-        })
-      }
-    }
+          // Find the path that best matches entry/exit points
+          let bestMatch: (typeof curvedPaths)[0] | null = null
+          let bestScore = Infinity
 
-    // Track which routes need midpoint insertions (routeIndex -> list of insertions)
-    // Use a Set to track unique insertions by segment index to avoid duplicates
-    const insertions: Map<
-      number,
-      Map<number, { afterSegmentIndex: number; point: Point2D & { z: number } }>
-    > = new Map()
+          for (const pathEntry of curvedPaths) {
+            // Calculate how well this path matches the traversal
+            const startDist = dist(pathEntry.start, entryPoint)
+            const endDist = exitPoint ? dist(pathEntry.end, exitPoint) : 0
+            const score = startDist + endDist
 
-    // Compare all pairs of segments (including from the same route!)
-    for (let i = 0; i < allSegments.length; i++) {
-      for (let j = i + 1; j < allSegments.length; j++) {
-        const seg1 = allSegments[i]
-        const seg2 = allSegments[j]
-
-        // For same-route segments, skip adjacent segments (they share an endpoint)
-        if (
-          seg1.routeIndex === seg2.routeIndex &&
-          Math.abs(seg1.segmentIndex - seg2.segmentIndex) <= 1
-        ) {
-          continue
-        }
-
-        // Check if segments are collinear
-        if (!areSegmentsCollinear(seg1.start, seg1.end, seg2.start, seg2.end)) {
-          continue
-        }
-
-        // Check if they overlap and get info about which is outer
-        const overlapInfo = getCollinearOverlapInfo(
-          seg1.start,
-          seg1.end,
-          seg2.start,
-          seg2.end,
-        )
-
-        if (!overlapInfo) continue
-
-        // Determine which route/segment is the outer one
-        const outerSeg = overlapInfo.outerSegment === 1 ? seg1 : seg2
-
-        // Compute offset midpoint for the outer segment
-        const offsetMidpoint = computeOffsetMidpoint(
-          overlapInfo.outerStart,
-          overlapInfo.outerEnd,
-          OFFSET_DISTANCE,
-        )
-
-        // Skip adding midpoints if the segment is inside jumper pads
-        if (outerSeg.isInsideJumperPad) {
-          continue
-        }
-
-        // Check if adding this midpoint would cause new intersections with other routes
-        // The new segments would be: (outerStart -> offsetMidpoint) and (offsetMidpoint -> outerEnd)
-        let wouldCauseIntersection = false
-        for (const otherSeg of allSegments) {
-          // Skip the outer segment itself and adjacent segments in the same route
-          if (
-            otherSeg.routeIndex === outerSeg.routeIndex &&
-            Math.abs(otherSeg.segmentIndex - outerSeg.segmentIndex) <= 1
-          ) {
-            continue
+            if (score < bestScore) {
+              bestScore = score
+              bestMatch = pathEntry
+            }
           }
 
-          // Check if the new segment from start to midpoint intersects with other segment
-          if (
-            doSegmentsIntersect(
-              overlapInfo.outerStart,
-              offsetMidpoint,
-              otherSeg.start,
-              otherSeg.end,
-            )
-          ) {
-            wouldCauseIntersection = true
-            break
-          }
-
-          // Check if the new segment from midpoint to end intersects with other segment
-          if (
-            doSegmentsIntersect(
-              offsetMidpoint,
-              overlapInfo.outerEnd,
-              otherSeg.start,
-              otherSeg.end,
-            )
-          ) {
-            wouldCauseIntersection = true
-            break
+          // Use a tolerance for matching (points should be very close)
+          if (bestMatch && bestScore < 0.5) {
+            matchedPath = bestMatch.path
           }
         }
 
-        // Skip adding this midpoint if it would cause new intersections
-        if (wouldCauseIntersection) {
-          continue
-        }
-
-        // Add to insertions for the outer route (using Map to dedupe by segment index)
-        if (!insertions.has(outerSeg.routeIndex)) {
-          insertions.set(outerSeg.routeIndex, new Map())
-        }
-        const routeInsertions = insertions.get(outerSeg.routeIndex)!
-        // Only add if we haven't already added an insertion for this segment
-        if (!routeInsertions.has(outerSeg.segmentIndex)) {
-          routeInsertions.set(outerSeg.segmentIndex, {
-            afterSegmentIndex: outerSeg.segmentIndex,
-            point: { ...offsetMidpoint, z: 0 },
-          })
+        if (matchedPath && matchedPath.length > 0) {
+          // Use the curved path
+          // Skip the first point if we already have points (to avoid duplicates)
+          const startIdx = routePoints.length > 0 ? 1 : 0
+          for (let i = startIdx; i < matchedPath.length; i++) {
+            routePoints.push({ x: matchedPath[i].x, y: matchedPath[i].y, z: 0 })
+          }
+        } else {
+          // Use straight line for pad regions, through-jumper regions, or fallback
+          // Skip the first point if we already have points
+          if (routePoints.length === 0) {
+            routePoints.push({
+              x: traversal.entryPort.d.x,
+              y: traversal.entryPort.d.y,
+              z: 0,
+            })
+          }
+          if (traversal.exitPort) {
+            routePoints.push({
+              x: traversal.exitPort.d.x,
+              y: traversal.exitPort.d.y,
+              z: 0,
+            })
+          }
         }
       }
-    }
 
-    // Apply insertions to routes (in reverse order to preserve indices)
-    for (const [routeIndex, routeInsertionsMap] of insertions) {
-      // Convert map to array and sort by segment index descending
-      const routeInsertions = Array.from(routeInsertionsMap.values())
-      routeInsertions.sort((a, b) => b.afterSegmentIndex - a.afterSegmentIndex)
-
-      const route = this.solvedRoutes[routeIndex]
-      for (const insertion of routeInsertions) {
-        // Insert the midpoint after the start of the segment (at index + 1)
-        route.route.splice(insertion.afterSegmentIndex + 1, 0, insertion.point)
-      }
+      this.solvedRoutes.push({
+        connectionName: routeInfo.connectionId,
+        rootConnectionName: routeInfo.rootConnectionName,
+        traceThickness: this.traceWidth,
+        route: routePoints,
+        jumpers: routeInfo.jumpers,
+      })
     }
   }
 
@@ -614,7 +836,6 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
     // Route jumpers have start/end at individual pad positions, so we use those
     // directly as keys rather than the jumperLocation center.
     const padUsageMap = new Map<string, string[]>()
-    const TOLERANCE = 0.01
 
     for (const route of this.solvedRoutes) {
       for (const jumper of route.jumpers) {

@@ -42,7 +42,6 @@ import { getGlobalInMemoryCache } from "lib/cache/setupGlobalCaches"
 import { NetToPointPairsSolver2_OffBoardConnection } from "../../solvers/NetToPointPairsSolver2_OffBoardConnection/NetToPointPairsSolver2_OffBoardConnection"
 import { RectDiffPipeline } from "@tscircuit/rectdiff"
 import { TraceSimplificationSolver } from "../../solvers/TraceSimplificationSolver/TraceSimplificationSolver"
-import { TraceKeepoutSolver } from "../../solvers/TraceKeepoutSolver/TraceKeepoutSolver"
 import { TraceWidthSolver } from "../../solvers/TraceWidthSolver/TraceWidthSolver"
 import { AvailableSegmentPointSolver } from "../../solvers/AvailableSegmentPointSolver/AvailableSegmentPointSolver"
 import {
@@ -62,6 +61,7 @@ import {
 } from "lib/solvers/PortPointPathingSolver/HyperPortPointPathingSolver"
 import { RelateNodesToOffBoardConnectionsSolver } from "../AssignableAutoroutingPipeline2/RelateNodesToOffBoardConnectionsSolver"
 import { updateConnMapWithOffboardObstacleConnections } from "../AssignableAutoroutingPipeline2/updateConnMapWithOffboardObstacleConnections"
+import { TraceKeepoutSolver } from "lib/solvers/TraceKeepoutSolver/TraceKeepoutSolver"
 
 interface CapacityMeshSolverOptions {
   capacityDepth?: number
@@ -104,6 +104,7 @@ function definePipelineStep<
 export class AssignableAutoroutingPipeline3 extends BaseSolver {
   netToPointPairsSolver?: NetToPointPairsSolver
   // nodeSolver?: CapacityMeshNodeSolver2_NodeUnderObstacle
+  traceKeepoutSolver?: TraceKeepoutSolver
   nodeSolver?: RectDiffPipeline
   nodeTargetMerger?: CapacityNodeTargetMerger
   edgeSolver?: CapacityMeshEdgeSolver
@@ -119,7 +120,6 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
   strawSolver?: StrawSolver
   deadEndSolver?: DeadEndSolver
   traceSimplificationSolver?: TraceSimplificationSolver
-  traceKeepoutSolver?: TraceKeepoutSolver
   traceWidthSolver?: TraceWidthSolver
   availableSegmentPointSolver?: AvailableSegmentPointSolver
   portPointPathingSolver?: PortPointPathingSolver
@@ -274,7 +274,11 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
               // RANDOM_WALK_DISTANCE: 50,
               // SHUFFLE_SEED: 275,
               JUMPER_PF_FN_ENABLED: true,
-              NODE_PF_FACTOR: 1000,
+              NODE_PF_FACTOR: 100,
+              MAX_RIPS: 100,
+              RIPPING_ENABLED: true,
+              RIPPING_PF_THRESHOLD: 0.9,
+              RANDOM_RIP_FRACTION: 0.05,
               NODE_PF_MAX_PENALTY: 1000,
               STRAIGHT_LINE_DEVIATION_PENALTY_FACTOR: 0,
               // MIN_ALLOWED_BOARD_SCORE: -1,
@@ -298,41 +302,41 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
         },
       },
     ),
-    definePipelineStep(
-      "multiSectionPortPointOptimizer",
-      MultiSectionPortPointOptimizer,
-      (cms) => {
-        const portPointSolver = cms.portPointPathingSolver!
-        return [
-          {
-            simpleRouteJson: cms.srjWithPointPairs!,
-            inputNodes: portPointSolver.inputNodes,
-            capacityMeshNodes: cms.capacityNodes!,
-            capacityMeshEdges: cms.capacityEdges!,
-            colorMap: cms.colorMap,
-            initialConnectionResults: portPointSolver.connectionsWithResults,
-            initialAssignedPortPoints: portPointSolver.assignedPortPoints,
-            initialNodeAssignedPortPoints:
-              portPointSolver.nodeAssignedPortPoints,
-            ALWAYS_RIP_INTERSECTIONS: true,
-            FRACTION_TO_REPLACE: 0.2,
-            MAX_ATTEMPTS_PER_NODE: 3 * this.effort,
-            MAX_SECTION_ATTEMPTS: 30 * this.effort,
-            JUMPER_PF_FN_ENABLED: true,
-            HYPERPARAMETER_SCHEDULE: [
-              {
-                EXPANSION_DEGREES: 10,
-                MAX_RIPS: 100,
-                JUMPER_PF_FN_ENABLED: true,
-                NODE_PF_FACTOR: 100,
-                STRAIGHT_LINE_DEVIATION_PENALTY_FACTOR: 0,
-                NODE_PF_MAX_PENALTY: 300,
-              },
-            ],
-          } as MultiSectionPortPointOptimizerParams,
-        ]
-      },
-    ),
+    // definePipelineStep(
+    //   "multiSectionPortPointOptimizer",
+    //   MultiSectionPortPointOptimizer,
+    //   (cms) => {
+    //     const portPointSolver = cms.portPointPathingSolver!
+    //     return [
+    //       {
+    //         simpleRouteJson: cms.srjWithPointPairs!,
+    //         inputNodes: portPointSolver.inputNodes,
+    //         capacityMeshNodes: cms.capacityNodes!,
+    //         capacityMeshEdges: cms.capacityEdges!,
+    //         colorMap: cms.colorMap,
+    //         initialConnectionResults: portPointSolver.connectionsWithResults,
+    //         initialAssignedPortPoints: portPointSolver.assignedPortPoints,
+    //         initialNodeAssignedPortPoints:
+    //           portPointSolver.nodeAssignedPortPoints,
+    //         ALWAYS_RIP_INTERSECTIONS: true,
+    //         FRACTION_TO_REPLACE: 0.1,
+    //         MAX_ATTEMPTS_PER_NODE: 3 * this.effort,
+    //         MAX_SECTION_ATTEMPTS: 30 * this.effort,
+    //         JUMPER_PF_FN_ENABLED: true,
+    //         HYPERPARAMETER_SCHEDULE: [
+    //           {
+    //             ...this.portPointPathingSolver?.hyperParameters,
+    //             EXPANSION_DEGREES: 10,
+    //             MAX_RIPS: 10,
+    //             RANDOM_RIP_FRACTION: 0.1,
+    //             RIPPING_PF_THRESHOLD: 0.9,
+    //             STRAIGHT_LINE_DEVIATION_PENALTY_FACTOR: 0,
+    //           },
+    //         ],
+    //       } as MultiSectionPortPointOptimizerParams,
+    //     ]
+    //   },
+    // ),
     // definePipelineStep("highDensitySolver", SimpleHighDensitySolver, (cms) => [
     //   {
     //     nodePortPoints:
@@ -355,6 +359,8 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
         viaDiameter: cms.viaDiameter,
         traceWidth: cms.minTraceWidth,
         connMap: cms.connMap,
+        capacityMeshNodes: cms.capacityNodes ?? [],
+        capacityMeshEdges: cms.capacityEdges ?? [],
       },
     ]),
     definePipelineStep(
@@ -397,7 +403,7 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
       {
         hdRoutes:
           cms.traceSimplificationSolver?.simplifiedHdRoutes ??
-          cms?.highDensityStitchSolver?.mergedHdRoutes ??
+          cms.highDensityStitchSolver?.mergedHdRoutes ??
           [],
         obstacles: cms.srj.obstacles,
         jumpers: cms.highDensitySolver?.getOutputJumpers() ?? [],
@@ -406,22 +412,25 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
         srj: cms.srj,
       },
     ]),
-    definePipelineStep("traceWidthSolver", TraceWidthSolver, (cms) => [
-      {
-        hdRoutes: cms.traceKeepoutSolver?.redrawnHdRoutes ?? [],
-        obstacles: [
-          ...cms.srj.obstacles,
-          ...(cms.highDensitySolver?.getOutputJumpers() ?? []).flatMap(
-            (jumper) => jumper.pads,
-          ),
-        ] as Obstacle[],
-        connMap: cms.connMap,
-        colorMap: cms.colorMap,
-        nominalTraceWidth: cms.srj.nominalTraceWidth,
-        minTraceWidth: cms.minTraceWidth,
-        obstacleMargin: cms.srj.defaultObstacleMargin ?? 0.15,
-      },
-    ]),
+    // definePipelineStep("traceWidthSolver", TraceWidthSolver, (cms) => [
+    //   {
+    //     hdRoutes:
+    //       cms.traceSimplificationSolver?.simplifiedHdRoutes ??
+    //       cms?.highDensityStitchSolver?.mergedHdRoutes ??
+    //       [],
+    //     obstacles: [
+    //       ...cms.srj.obstacles,
+    //       ...(cms.highDensitySolver?.getOutputJumpers() ?? []).flatMap(
+    //         (jumper) => jumper.pads,
+    //       ),
+    //     ] as Obstacle[],
+    //     connMap: cms.connMap,
+    //     colorMap: cms.colorMap,
+    //     nominalTraceWidth: cms.srj.nominalTraceWidth,
+    //     minTraceWidth: cms.minTraceWidth,
+    //     obstacleMargin: cms.srj.defaultObstacleMargin ?? 0.15,
+    //   },
+    // ]),
   ]
 
   constructor(
@@ -519,6 +528,7 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
     const singleLayerNodeMergerViz = this.singleLayerNodeMerger?.visualize()
     const strawSolverViz = this.strawSolver?.visualize()
     const edgeViz = this.edgeSolver?.visualize()
+    const traceKeepoutViz = this.traceKeepoutSolver?.visualize()
     const deadEndViz = this.deadEndSolver?.visualize()
     const availableSegmentPointViz =
       this.availableSegmentPointSolver?.visualize()
@@ -530,7 +540,6 @@ export class AssignableAutoroutingPipeline3 extends BaseSolver {
     const simpleHighDensityViz = this.simpleHighDensityRouteSolver?.visualize()
     const highDensityStitchViz = this.highDensityStitchSolver?.visualize()
     const traceSimplificationViz = this.traceSimplificationSolver?.visualize()
-    const traceKeepoutViz = this.traceKeepoutSolver?.visualize()
     const traceWidthViz = this.traceWidthSolver?.visualize()
     const problemOutline = this.srj.outline
     const problemLines: Line[] = []

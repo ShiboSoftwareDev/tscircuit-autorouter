@@ -1,13 +1,10 @@
-import { test, expect } from "bun:test"
+import { GenericSolverDebugger } from "lib/testing/GenericSolverDebugger"
 import { JumperHighDensitySolver } from "lib/autorouter-pipelines/AssignableAutoroutingPipeline2/JumperHighDensitySolver"
 import { generateColorMapFromNodeWithPortPoints } from "lib/utils/generateColorMapFromNodeWithPortPoints"
-import input from "../../fixtures/features/jumper-high-density/jumper-high-density01-input.json" with {
-  type: "json",
-}
+import input from "./jumper-high-density08-input.json"
 
-test(
-  "JumperHighDensitySolver01 - solves high density routes with jumpers",
-  () => {
+export default () => {
+  const createSolver = () => {
     const nodePortPoints = (input as any[]).flatMap(
       (item: any) => item.nodePortPoints,
     )
@@ -20,15 +17,11 @@ test(
       }
     }
 
-    const solver = new JumperHighDensitySolver({
+    return new JumperHighDensitySolver({
       nodePortPoints,
       colorMap,
     })
+  }
 
-    solver.solve()
-
-    expect(solver.solved || solver.failed).toBe(true)
-    expect(solver.visualize()).toMatchGraphicsSvg(import.meta.path)
-  },
-  { timeout: 30000 },
-)
+  return <GenericSolverDebugger createSolver={createSolver} />
+}

@@ -17,6 +17,14 @@ import { HighDensityHyperParameters } from "../../solvers/HighDensitySolver/High
 import { getIntraNodeCrossingsUsingCircle } from "lib/utils/getIntraNodeCrossingsUsingCircle"
 import { JUMPER_DIMENSIONS } from "../../utils/jumperSizes"
 import type { Jumper as SrjJumper } from "../../types/srj-types"
+import type {
+  CapacityMeshNode,
+  CapacityMeshEdge,
+} from "../../types/capacity-mesh-types"
+import {
+  CurvyIntraNodeSolver,
+  type AdjacentObstacle,
+} from "../../solvers/CurvyIntraNodeSolver/CurvyIntraNodeSolver"
 
 /**
  * A unified route type that can represent both regular routes (with vias)
@@ -55,10 +63,11 @@ interface NodeAnalysis {
 
 /**
  * HighDensitySolver intelligently selects the appropriate solver for each node:
- * - SimpleHighDensitySolver for nodes without crossings (faster, force-directed)
+ * - CurvyIntraNodeSolver for nodes without crossings (uses curvy trace solver)
  * - IntraNodeSolverWithJumpers for single-layer nodes with crossings (uses 0603 jumpers)
  *
- * This solver processes nodes in batches based on their characteristics.
+ * This solver processes nodes one at a time, passing adjacent obstacles from
+ * already-solved routes to maximize trace spacing.
  */
 export class JumperHighDensitySolver extends BaseSolver {
   allNodes: NodeWithPortPoints[]
@@ -70,19 +79,28 @@ export class JumperHighDensitySolver extends BaseSolver {
   connMap?: ConnectivityMap
   hyperParameters?: Partial<HighDensityHyperParameters>
 
+  // Capacity mesh data for obstacle computation
+  capacityMeshNodes: CapacityMeshNode[]
+  capacityMeshEdges: CapacityMeshEdge[]
+  capacityMeshNodeMap: Map<string, CapacityMeshNode>
+  nodeAdjacencyMap: Map<string, Set<string>>
+
   // Nodes grouped by solver type
   nodesWithoutCrossings: NodeWithPortPoints[]
   nodesWithCrossings: NodeWithPortPoints[]
 
-  // Sub-solvers
-  simpleHighDensitySolver?: SimpleHighDensitySolver
+  // Sub-solvers for nodes without crossings (curvy trace solver)
+  curvyIntraNodeSolvers: CurvyIntraNodeSolver[]
+  currentCurvySolverIndex: number
+
+  // Sub-solvers for nodes with crossings (jumper solver)
   // jumperSolvers: HyperIntraNodeSolverWithJumpers[]
   // jumperSolvers: JumperPrepatternSolver2_HyperGraph[]
   jumperSolvers: HyperJumperPrepatternSolver2[]
   currentJumperSolverIndex: number
 
   // State
-  phase: "analyzing" | "simple" | "jumpers" | "done"
+  phase: "analyzing" | "curvy" | "jumpers" | "done"
 
   // All jumpers collected from jumper solvers (SRJ format with connectedTo populated)
   jumpers: SrjJumper[] = []
@@ -90,10 +108,12 @@ export class JumperHighDensitySolver extends BaseSolver {
   constructor({
     nodePortPoints,
     colorMap,
-    traceWidth = 0.1,
+    traceWidth = 0.15,
     viaDiameter = 0.6,
     connMap,
     hyperParameters,
+    capacityMeshNodes = [],
+    capacityMeshEdges = [],
   }: {
     nodePortPoints: NodeWithPortPoints[]
     colorMap?: Record<string, string>
@@ -101,6 +121,8 @@ export class JumperHighDensitySolver extends BaseSolver {
     viaDiameter?: number
     connMap?: ConnectivityMap
     hyperParameters?: Partial<HighDensityHyperParameters>
+    capacityMeshNodes?: CapacityMeshNode[]
+    capacityMeshEdges?: CapacityMeshEdge[]
   }) {
     super()
     this.allNodes = [...nodePortPoints]
@@ -110,10 +132,20 @@ export class JumperHighDensitySolver extends BaseSolver {
     this.viaDiameter = viaDiameter
     this.connMap = connMap
     this.hyperParameters = hyperParameters
+    this.capacityMeshNodes = capacityMeshNodes
+    this.capacityMeshEdges = capacityMeshEdges
+
+    // Build lookup maps for capacity mesh data
+    this.capacityMeshNodeMap = new Map(
+      capacityMeshNodes.map((n) => [n.capacityMeshNodeId, n]),
+    )
+    this.nodeAdjacencyMap = this._buildNodeAdjacencyMap()
 
     this.nodesWithoutCrossings = []
     this.nodesWithCrossings = []
     this.nodeAnalyses = []
+    this.curvyIntraNodeSolvers = []
+    this.currentCurvySolverIndex = 0
     this.jumperSolvers = []
     this.currentJumperSolverIndex = 0
     this.phase = "analyzing"
@@ -122,9 +154,28 @@ export class JumperHighDensitySolver extends BaseSolver {
     this._analyzeNodes()
 
     // Calculate max iterations
-    const simpleIterations = this.nodesWithoutCrossings.length * 10 + 1
+    const curvyIterations = this.nodesWithoutCrossings.length * 1000
     const jumperIterations = this.nodesWithCrossings.length * 100000
-    this.MAX_ITERATIONS = simpleIterations + jumperIterations + 100
+    this.MAX_ITERATIONS = curvyIterations + jumperIterations + 100
+  }
+
+  /**
+   * Build adjacency map from edges for quick lookup of adjacent nodes
+   */
+  _buildNodeAdjacencyMap(): Map<string, Set<string>> {
+    const adjacencyMap = new Map<string, Set<string>>()
+    for (const edge of this.capacityMeshEdges) {
+      const [nodeId1, nodeId2] = edge.nodeIds
+      if (!adjacencyMap.has(nodeId1)) {
+        adjacencyMap.set(nodeId1, new Set())
+      }
+      if (!adjacencyMap.has(nodeId2)) {
+        adjacencyMap.set(nodeId2, new Set())
+      }
+      adjacencyMap.get(nodeId1)!.add(nodeId2)
+      adjacencyMap.get(nodeId2)!.add(nodeId1)
+    }
+    return adjacencyMap
   }
 
   /**
@@ -154,10 +205,12 @@ export class JumperHighDensitySolver extends BaseSolver {
 
     // Move to next phase and initialize appropriate solvers
     if (this.nodesWithoutCrossings.length > 0) {
-      this.phase = "simple"
+      this.phase = "curvy"
+      // Initialize curvy solvers for nodes without crossings
+      this._initializeCurvySolvers()
     } else if (this.nodesWithCrossings.length > 0) {
       this.phase = "jumpers"
-      // Initialize jumper solvers immediately since we're skipping simple phase
+      // Initialize jumper solvers immediately since we're skipping curvy phase
       this._initializeJumperSolvers()
     } else {
       this.phase = "done"
@@ -168,12 +221,19 @@ export class JumperHighDensitySolver extends BaseSolver {
     switch (this.phase) {
       case "analyzing":
         // Already done in constructor
-        this.phase =
-          this.nodesWithoutCrossings.length > 0 ? "simple" : "jumpers"
+        if (this.nodesWithoutCrossings.length > 0) {
+          this.phase = "curvy"
+          this._initializeCurvySolvers()
+        } else if (this.nodesWithCrossings.length > 0) {
+          this.phase = "jumpers"
+          this._initializeJumperSolvers()
+        } else {
+          this.phase = "done"
+        }
         break
 
-      case "simple":
-        this._stepSimpleSolver()
+      case "curvy":
+        this._stepCurvySolvers()
         break
 
       case "jumpers":
@@ -186,41 +246,166 @@ export class JumperHighDensitySolver extends BaseSolver {
     }
   }
 
-  _stepSimpleSolver() {
-    // Initialize simple solver if not yet created
-    if (!this.simpleHighDensitySolver) {
-      if (this.nodesWithoutCrossings.length === 0) {
-        // No nodes without crossings, skip to jumpers phase
-        this.phase = "jumpers"
-        // Initialize jumper solvers now since we're skipping simple phase
-        this._initializeJumperSolvers()
-        return
+  /**
+   * Compute obstacles from adjacent nodes.
+   * Uses the edge solver's adjacency information and only considers nodes
+   * that contain obstacles or targets.
+   *
+   * Rules:
+   * - Only adjacent nodes (from edges) are considered
+   * - Only nodes with _containsObstacle or _containsTarget are obstacles
+   * - If node contains obstacle but no target: no networkId
+   * - If node contains target: networkId = _targetConnectionName (or from port points)
+   */
+  _getAdjacentObstacles(node: NodeWithPortPoints): AdjacentObstacle[] {
+    const obstacles: AdjacentObstacle[] = []
+
+    // Get adjacent node IDs from the edge-computed adjacency map
+    const adjacentNodeIds = this.nodeAdjacencyMap.get(node.capacityMeshNodeId)
+    if (!adjacentNodeIds || adjacentNodeIds.size === 0) {
+      return obstacles
+    }
+
+    // Build a lookup for nodes with port points
+    const nodeWithPortPointsMap = new Map(
+      this.allNodes.map((n) => [n.capacityMeshNodeId, n]),
+    )
+
+    for (const adjacentNodeId of adjacentNodeIds) {
+      const capacityNode = this.capacityMeshNodeMap.get(adjacentNodeId)
+      if (!capacityNode) {
+        continue
       }
 
-      this.simpleHighDensitySolver = new SimpleHighDensitySolver({
-        nodePortPoints: this.nodesWithoutCrossings,
-        colorMap: this.colorMap,
-        traceWidth: this.traceWidth,
-        viaDiameter: this.viaDiameter,
+      // Only consider nodes that contain obstacles or targets
+      if (!capacityNode._containsObstacle && !capacityNode._containsTarget) {
+        continue
+      }
+
+      const otherMinX = capacityNode.center.x - capacityNode.width / 2
+      const otherMinY = capacityNode.center.y - capacityNode.height / 2
+      const otherMaxX = capacityNode.center.x + capacityNode.width / 2
+      const otherMaxY = capacityNode.center.y + capacityNode.height / 2
+
+      // Determine networkId based on whether it contains a target
+      let networkId: string | undefined
+      if (capacityNode._containsTarget) {
+        // Try to get from _targetConnectionName first
+        if (capacityNode._targetConnectionName) {
+          networkId = capacityNode._targetConnectionName
+        } else {
+          // Fall back to looking at port points if this node has them
+          const adjacentNodeWithPorts =
+            nodeWithPortPointsMap.get(adjacentNodeId)
+          if (
+            adjacentNodeWithPorts &&
+            adjacentNodeWithPorts.portPoints.length > 0
+          ) {
+            // Use the rootConnectionName from the first port point
+            networkId =
+              adjacentNodeWithPorts.portPoints[0].rootConnectionName ??
+              adjacentNodeWithPorts.portPoints[0].connectionName
+          }
+        }
+      }
+      // If it only contains an obstacle (no target), no networkId is assigned
+
+      obstacles.push({
+        minX: otherMinX,
+        minY: otherMinY,
+        maxX: otherMaxX,
+        maxY: otherMaxY,
+        networkId,
       })
     }
 
-    this.activeSubSolver = this.simpleHighDensitySolver
-    this.simpleHighDensitySolver.step()
+    return obstacles
+  }
 
-    if (this.simpleHighDensitySolver.solved) {
-      // Collect routes from simple solver
-      this.routes.push(...this.simpleHighDensitySolver.routes)
+  /**
+   * Initialize CurvyIntraNodeSolver for each node without crossings.
+   * Each solver is created with adjacent obstacles from already-solved routes.
+   */
+  _initializeCurvySolvers() {
+    // Create a solver for each node without crossings
+    for (const node of this.nodesWithoutCrossings) {
+      // Get adjacent obstacles from routes solved so far
+      const adjacentObstacles = this._getAdjacentObstacles(node)
 
-      // Move to jumper phase
+      const solver = new CurvyIntraNodeSolver({
+        nodeWithPortPoints: node,
+        colorMap: this.colorMap,
+        traceWidth: this.traceWidth,
+        viaDiameter: this.viaDiameter,
+        adjacentObstacles,
+      })
+      this.curvyIntraNodeSolvers.push(solver)
+    }
+  }
+
+  /**
+   * Step through curvy solvers one at a time.
+   * After each solver completes, its routes become obstacles for subsequent nodes.
+   */
+  _stepCurvySolvers() {
+    if (this.curvyIntraNodeSolvers.length === 0) {
       this.phase = this.nodesWithCrossings.length > 0 ? "jumpers" : "done"
-
-      // Initialize jumper solvers
       if (this.phase === "jumpers") {
         this._initializeJumperSolvers()
       }
-    } else if (this.simpleHighDensitySolver.failed) {
-      this.error = `SimpleHighDensitySolver failed: ${this.simpleHighDensitySolver.error}`
+      return
+    }
+
+    const currentSolver =
+      this.curvyIntraNodeSolvers[this.currentCurvySolverIndex]
+    this.activeSubSolver = currentSolver
+    if (!currentSolver) {
+      this.phase = this.nodesWithCrossings.length > 0 ? "jumpers" : "done"
+      if (this.phase === "jumpers") {
+        this._initializeJumperSolvers()
+      }
+      return
+    }
+
+    currentSolver.step()
+
+    if (currentSolver.solved) {
+      // Collect routes from curvy solver
+      this.routes.push(...currentSolver.routes)
+
+      this.currentCurvySolverIndex++
+
+      // Update adjacent obstacles for remaining solvers with newly solved routes
+      for (
+        let i = this.currentCurvySolverIndex;
+        i < this.curvyIntraNodeSolvers.length;
+        i++
+      ) {
+        const futureSolver = this.curvyIntraNodeSolvers[i]
+        const node = this.nodesWithoutCrossings[i]
+        const additionalObstacles = this._getAdjacentObstacles(node)
+
+        // Merge additional obstacles into the solver's obstacles
+        // Note: We re-initialize the solver with updated obstacles
+        const newSolver = new CurvyIntraNodeSolver({
+          nodeWithPortPoints: node,
+          colorMap: this.colorMap,
+          traceWidth: this.traceWidth,
+          viaDiameter: this.viaDiameter,
+          adjacentObstacles: additionalObstacles,
+        })
+        this.curvyIntraNodeSolvers[i] = newSolver
+      }
+
+      if (this.currentCurvySolverIndex >= this.curvyIntraNodeSolvers.length) {
+        // Move to jumper phase
+        this.phase = this.nodesWithCrossings.length > 0 ? "jumpers" : "done"
+        if (this.phase === "jumpers") {
+          this._initializeJumperSolvers()
+        }
+      }
+    } else if (currentSolver.failed) {
+      this.error = `CurvyIntraNodeSolver failed for node: ${currentSolver.nodeWithPortPoints.capacityMeshNodeId}: ${currentSolver.error}`
       this.failed = true
     }
   }
@@ -300,15 +485,14 @@ export class JumperHighDensitySolver extends BaseSolver {
 
     let completedNodes = 0
 
-    // Count completed from simple solver
-    if (this.simpleHighDensitySolver) {
-      const simpleProgress = this.simpleHighDensitySolver.solved
-        ? this.nodesWithoutCrossings.length
-        : Math.floor(
-            this.simpleHighDensitySolver.progress *
-              this.nodesWithoutCrossings.length,
-          )
-      completedNodes += simpleProgress
+    // Count completed from curvy solvers
+    completedNodes += this.currentCurvySolverIndex
+
+    // Add progress from current curvy solver
+    const currentCurvySolver =
+      this.curvyIntraNodeSolvers[this.currentCurvySolverIndex]
+    if (currentCurvySolver) {
+      completedNodes += currentCurvySolver.progress
     }
 
     // Count completed from jumper solvers
@@ -332,6 +516,8 @@ export class JumperHighDensitySolver extends BaseSolver {
       viaDiameter: this.viaDiameter,
       connMap: this.connMap,
       hyperParameters: this.hyperParameters,
+      capacityMeshNodes: this.capacityMeshNodes,
+      capacityMeshEdges: this.capacityMeshEdges,
     }
   }
 
@@ -359,8 +545,13 @@ export class JumperHighDensitySolver extends BaseSolver {
     }
 
     // If currently running a sub-solver, show its visualization
-    if (this.phase === "simple" && this.simpleHighDensitySolver) {
-      return this.simpleHighDensitySolver.visualize()
+    if (
+      this.phase === "curvy" &&
+      this.curvyIntraNodeSolvers[this.currentCurvySolverIndex]
+    ) {
+      return this.curvyIntraNodeSolvers[
+        this.currentCurvySolverIndex
+      ].visualize()
     }
 
     if (
@@ -372,10 +563,11 @@ export class JumperHighDensitySolver extends BaseSolver {
 
     // Show completed routes
     for (const route of this.routes) {
+      const colorKey = route.rootConnectionName ?? route.connectionName
       const mergedSegments = mergeRouteSegments(
         route.route,
         route.connectionName,
-        this.colorMap[route.connectionName],
+        this.colorMap[colorKey],
       )
 
       for (const segment of mergedSegments) {
@@ -397,10 +589,7 @@ export class JumperHighDensitySolver extends BaseSolver {
         graphics.circles!.push({
           center: via,
           radius: route.viaDiameter / 2,
-          fill: safeTransparentize(
-            this.colorMap[route.connectionName] ?? "gray",
-            0.5,
-          ),
+          fill: safeTransparentize(this.colorMap[colorKey] ?? "gray", 0.5),
           layer: "via",
         })
       }
@@ -408,7 +597,7 @@ export class JumperHighDensitySolver extends BaseSolver {
       // Draw jumpers if present
       if ("jumpers" in route && route.jumpers) {
         for (const jumper of route.jumpers) {
-          const color = this.colorMap[route.connectionName] ?? "gray"
+          const color = this.colorMap[colorKey] ?? "gray"
 
           // Get dimensions based on jumper footprint (default to 1206 for hypergraph solver)
           const footprint = jumper.footprint ?? "1206"
