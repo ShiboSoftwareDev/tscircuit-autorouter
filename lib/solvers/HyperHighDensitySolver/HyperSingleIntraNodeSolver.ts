@@ -2,6 +2,7 @@ import {
   HighDensityIntraNodeRoute,
   NodeWithPortPoints,
 } from "lib/types/high-density-types"
+import { pointToSegmentDistance } from "@tscircuit/math-utils"
 import { CachedIntraNodeRouteSolver } from "../HighDensitySolver/CachedIntraNodeRouteSolver"
 import { IntraNodeRouteSolver } from "../HighDensitySolver/IntraNodeSolver"
 import {
@@ -324,6 +325,20 @@ export class HyperSingleIntraNodeSolver extends HyperParameterSupervisorSolver<
     } else {
       routes = solver.solver.solvedRoutes
     }
+
+    const invalidConnectionName = getFirstConnectionWithUncoveredPortPoint(
+      routes,
+      this.nodeWithPortPoints,
+    )
+    if (invalidConnectionName) {
+      solver.solver.solved = false
+      solver.solver.failed = true
+      solver.solver.error = `Solver returned partial intra-node routing for connection "${invalidConnectionName}" in node "${this.nodeWithPortPoints.capacityMeshNodeId}"`
+      this.solved = false
+      this.winningSolver = undefined
+      return
+    }
+
     this.solvedRoutes = routes.map((route) => {
       const matchingPortPoint = this.nodeWithPortPoints.portPoints.find(
         (p) => p.connectionName === route.connectionName,
@@ -337,4 +352,67 @@ export class HyperSingleIntraNodeSolver extends HyperParameterSupervisorSolver<
       return route
     })
   }
+}
+
+const isSamePoint3 = (
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+  epsilon = 1e-6,
+) =>
+  Math.abs(a.x - b.x) <= epsilon &&
+  Math.abs(a.y - b.y) <= epsilon &&
+  a.z === b.z
+
+const doesRouteCoverPoint = (
+  route: Array<{ x: number; y: number; z: number }>,
+  point: { x: number; y: number; z: number },
+) => {
+  for (const routePoint of route) {
+    if (isSamePoint3(routePoint, point)) return true
+  }
+
+  for (let i = 0; i < route.length - 1; i++) {
+    const A = route[i]
+    const B = route[i + 1]
+    if (A.z !== point.z || B.z !== point.z) continue
+    if (pointToSegmentDistance(point, A, B) <= 1e-6) return true
+  }
+
+  return false
+}
+
+const getFirstConnectionWithUncoveredPortPoint = (
+  routes: HighDensityIntraNodeRoute[],
+  nodeWithPortPoints: NodeWithPortPoints,
+) => {
+  const routesByConnection = new Map<string, HighDensityIntraNodeRoute[]>()
+  for (const route of routes) {
+    if (!routesByConnection.has(route.connectionName)) {
+      routesByConnection.set(route.connectionName, [])
+    }
+    routesByConnection.get(route.connectionName)!.push(route)
+  }
+
+  const portPointsByConnection = new Map<
+    string,
+    Array<{ x: number; y: number; z: number }>
+  >()
+  for (const portPoint of nodeWithPortPoints.portPoints) {
+    if (!portPointsByConnection.has(portPoint.connectionName)) {
+      portPointsByConnection.set(portPoint.connectionName, [])
+    }
+    portPointsByConnection.get(portPoint.connectionName)!.push(portPoint)
+  }
+
+  for (const [connectionName, points] of portPointsByConnection) {
+    const connectionRoutes = routesByConnection.get(connectionName) ?? []
+    const coversAllPoints = points.every((point) =>
+      connectionRoutes.some((route) => doesRouteCoverPoint(route.route, point)),
+    )
+    if (!coversAllPoints) {
+      return connectionName
+    }
+  }
+
+  return null
 }

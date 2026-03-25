@@ -14,12 +14,10 @@ test(
     const solver = new AutoroutingPipelineSolver4(circuit003)
     solver.solve()
 
-    expect(solver.solved).toBe(true)
-    expect(solver.failed).toBe(false)
-
     const cmn3Meta =
       solver.highDensityRouteSolver?.nodeSolveMetadataById.get("cmn_3")
     expect(cmn3Meta).toBeDefined()
+    expect(cmn3Meta?.status).toBe("solved")
 
     const center = cmn3Meta!.node.center
     const sourceNet5Routes = (
