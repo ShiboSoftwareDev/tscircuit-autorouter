@@ -18,34 +18,67 @@ export type UnsolvedRoute = {
 }
 
 const ENDPOINT_TOLERANCE = 1e-6
+const ENDPOINT_BUCKET_SIZE = ENDPOINT_TOLERANCE
 
-const areSameEndpoint = (
-  a: { x: number; y: number; z: number },
-  b: { x: number; y: number; z: number },
-) => a.z === b.z && distance(a, b) < ENDPOINT_TOLERANCE
+type Endpoint = { x: number; y: number; z: number }
+type EndpointCluster = {
+  connectionName: string
+  point: Endpoint
+  id: string
+}
+type EndpointClusterIndex = Map<string, EndpointCluster[]>
+
+const areSameEndpoint = (a: Endpoint, b: Endpoint) =>
+  a.z === b.z && distance(a, b) < ENDPOINT_TOLERANCE
+
+const getEndpointBucketCoordinates = (point: Endpoint) => ({
+  x: Math.floor(point.x / ENDPOINT_BUCKET_SIZE),
+  y: Math.floor(point.y / ENDPOINT_BUCKET_SIZE),
+})
+
+const getEndpointBucketKey = (
+  connectionName: string,
+  z: number,
+  xBucket: number,
+  yBucket: number,
+) => `${connectionName}:${z}:${xBucket}:${yBucket}`
 
 const getEndpointClusterId = (
   connectionName: string,
-  point: { x: number; y: number; z: number },
-  endpointClusters: Array<{
-    connectionName: string
-    point: { x: number; y: number; z: number }
-    id: string
-  }>,
+  point: Endpoint,
+  endpointClusterIndex: EndpointClusterIndex,
+  endpointClusterCount: { value: number },
 ) => {
-  const existingCluster = endpointClusters.find(
-    (cluster) =>
-      cluster.connectionName === connectionName &&
-      areSameEndpoint(cluster.point, point),
-  )
-  if (existingCluster) return existingCluster.id
+  const { x, y } = getEndpointBucketCoordinates(point)
+  for (let xOffset = -1; xOffset <= 1; xOffset++) {
+    for (let yOffset = -1; yOffset <= 1; yOffset++) {
+      const bucketKey = getEndpointBucketKey(
+        connectionName,
+        point.z,
+        x + xOffset,
+        y + yOffset,
+      )
+      const bucket = endpointClusterIndex.get(bucketKey)
+      if (!bucket) continue
 
-  const newId = `${connectionName}:cluster_${endpointClusters.length}`
-  endpointClusters.push({
+      const existingCluster = bucket.find((cluster) =>
+        areSameEndpoint(cluster.point, point),
+      )
+      if (existingCluster) return existingCluster.id
+    }
+  }
+
+  const newId = `${connectionName}:cluster_${endpointClusterCount.value}`
+  const bucketKey = getEndpointBucketKey(connectionName, point.z, x, y)
+  const bucket = endpointClusterIndex.get(bucketKey) ?? []
+  const newCluster: EndpointCluster = {
     connectionName,
     point: { ...point },
     id: newId,
-  })
+  }
+  bucket.push(newCluster)
+  endpointClusterIndex.set(bucketKey, bucket)
+  endpointClusterCount.value += 1
   return newId
 }
 
@@ -79,11 +112,8 @@ export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
     const routeIslandConnectivityMap = new ConnectivityMap({})
     const routeIslandConnections: Array<string[]> = []
     const routeIslands = []
-    const endpointClusters: Array<{
-      connectionName: string
-      point: { x: number; y: number; z: number }
-      id: string
-    }> = []
+    const endpointClusterIndex: EndpointClusterIndex = new Map()
+    const endpointClusterCount = { value: 0 }
     const pointHashCounts = new Map<string, number>()
 
     for (let i = 0; i < params.hdRoutes.length; i++) {
@@ -93,12 +123,14 @@ export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
       const startClusterId = getEndpointClusterId(
         hdRoute.connectionName,
         start,
-        endpointClusters,
+        endpointClusterIndex,
+        endpointClusterCount,
       )
       const endClusterId = getEndpointClusterId(
         hdRoute.connectionName,
         end,
-        endpointClusters,
+        endpointClusterIndex,
+        endpointClusterCount,
       )
       routeIslandConnections.push([
         `route_island_${i}`,
@@ -145,7 +177,8 @@ export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
         const pointHash = getEndpointClusterId(
           hdRoutes[0].connectionName,
           possibleEndpoint1,
-          endpointClusters,
+          endpointClusterIndex,
+          endpointClusterCount,
         )
         if (pointHashCounts.get(pointHash) === 1) {
           possibleEndpoints2.push(possibleEndpoint1)
