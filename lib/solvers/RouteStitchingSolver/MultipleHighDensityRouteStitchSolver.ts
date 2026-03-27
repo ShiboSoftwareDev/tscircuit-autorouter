@@ -49,6 +49,32 @@ const getEndpointClusterId = (
   return newId
 }
 
+const CONNECTION_POINT_POSITION_TOLERANCE = 1e-3
+
+const alignPointToConnectionLayer = (
+  point: { x: number; y: number; z: number },
+  connection: SimpleRouteConnection,
+  layerCount: number,
+) => {
+  const matchingConnectionPoint = connection.pointsToConnect.find(
+    (connectionPoint) =>
+      Math.abs(connectionPoint.x - point.x) <
+        CONNECTION_POINT_POSITION_TOLERANCE &&
+      Math.abs(connectionPoint.y - point.y) <
+        CONNECTION_POINT_POSITION_TOLERANCE,
+  )
+
+  if (!matchingConnectionPoint) return point
+
+  return {
+    ...point,
+    z: mapLayerNameToZ(
+      getConnectionPointLayer(matchingConnectionPoint),
+      layerCount,
+    ),
+  }
+}
+
 export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
   override getSolverName(): string {
     return "MultipleHighDensityRouteStitchSolver"
@@ -187,6 +213,9 @@ export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
           ;[start, end] = [end, start]
         }
       }
+
+      start = alignPointToConnectionLayer(start, connection, params.layerCount)
+      end = alignPointToConnectionLayer(end, connection, params.layerCount)
 
       this.unsolvedRoutes.push({
         connectionName: hdRoutes[0].connectionName,

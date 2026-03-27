@@ -122,13 +122,25 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
         {
           x: this.start.x,
           y: this.start.y,
-          z: closestFirstRoutePoint.z,
+          z: this.start.z,
         },
       ],
       vias: [],
       jumpers: [],
       viaDiameter: firstRoute.viaDiameter,
       traceThickness: firstRoute.traceThickness,
+    }
+
+    if (this.start.z !== closestFirstRoutePoint.z) {
+      this.mergedHdRoute.route.push({
+        x: this.start.x,
+        y: this.start.y,
+        z: closestFirstRoutePoint.z,
+      })
+      this.mergedHdRoute.vias.push({
+        x: this.start.x,
+        y: this.start.y,
+      })
     }
   }
 
