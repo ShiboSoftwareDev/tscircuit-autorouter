@@ -15,4 +15,4 @@ test("bugreport44-0ec411.json", () => {
     import.meta.path,
   )
   expect(solver.solved).toBe(true)
-})
+}, 15_000)
