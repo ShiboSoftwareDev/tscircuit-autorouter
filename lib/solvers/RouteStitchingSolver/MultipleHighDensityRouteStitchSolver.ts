@@ -17,8 +17,37 @@ export type UnsolvedRoute = {
   end: { x: number; y: number; z: number }
 }
 
-const roundedPointHash = (p: { x: number; y: number; z: number }) =>
-  `${Math.round(p.x * 1e5)},${Math.round(p.y * 1e5)},${Math.round(p.z * 1e5)}`
+const ENDPOINT_TOLERANCE = 1e-6
+
+const areSameEndpoint = (
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+) => a.z === b.z && distance(a, b) < ENDPOINT_TOLERANCE
+
+const getEndpointClusterId = (
+  connectionName: string,
+  point: { x: number; y: number; z: number },
+  endpointClusters: Array<{
+    connectionName: string
+    point: { x: number; y: number; z: number }
+    id: string
+  }>,
+) => {
+  const existingCluster = endpointClusters.find(
+    (cluster) =>
+      cluster.connectionName === connectionName &&
+      areSameEndpoint(cluster.point, point),
+  )
+  if (existingCluster) return existingCluster.id
+
+  const newId = `${connectionName}:cluster_${endpointClusters.length}`
+  endpointClusters.push({
+    connectionName,
+    point: { ...point },
+    id: newId,
+  })
+  return newId
+}
 
 export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
   override getSolverName(): string {
@@ -50,17 +79,31 @@ export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
     const routeIslandConnectivityMap = new ConnectivityMap({})
     const routeIslandConnections: Array<string[]> = []
     const routeIslands = []
-
+    const endpointClusters: Array<{
+      connectionName: string
+      point: { x: number; y: number; z: number }
+      id: string
+    }> = []
     const pointHashCounts = new Map<string, number>()
 
     for (let i = 0; i < params.hdRoutes.length; i++) {
       const hdRoute = params.hdRoutes[i]
       const start = hdRoute.route[0]
       const end = hdRoute.route[hdRoute.route.length - 1]
+      const startClusterId = getEndpointClusterId(
+        hdRoute.connectionName,
+        start,
+        endpointClusters,
+      )
+      const endClusterId = getEndpointClusterId(
+        hdRoute.connectionName,
+        end,
+        endpointClusters,
+      )
       routeIslandConnections.push([
         `route_island_${i}`,
-        `${hdRoute.connectionName}:${roundedPointHash(start)}`,
-        `${hdRoute.connectionName}:${roundedPointHash(end)}`,
+        startClusterId,
+        endClusterId,
       ])
     }
     routeIslandConnectivityMap.addConnections(routeIslandConnections)
@@ -99,7 +142,11 @@ export class MultipleHighDensityRouteStitchSolver extends BaseSolver {
 
       const possibleEndpoints2 = []
       for (const possibleEndpoint1 of possibleEndpoints1) {
-        const pointHash = `${hdRoutes[0].connectionName}:${roundedPointHash(possibleEndpoint1)}`
+        const pointHash = getEndpointClusterId(
+          hdRoutes[0].connectionName,
+          possibleEndpoint1,
+          endpointClusters,
+        )
         if (pointHashCounts.get(pointHash) === 1) {
           possibleEndpoints2.push(possibleEndpoint1)
         }
