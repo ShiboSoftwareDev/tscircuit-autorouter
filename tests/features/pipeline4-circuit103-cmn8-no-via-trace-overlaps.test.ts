@@ -28,7 +28,7 @@ test(
       connMap: pipeline.connMap,
       viaDiameter: pipeline.viaDiameter,
       traceWidth: pipeline.minTraceWidth,
-      obstacleMargin: pipeline.obstacleMargin,
+      obstacleMargin: circuit103.defaultObstacleMargin ?? 0.15,
       effort: pipeline.effort,
     })
 
