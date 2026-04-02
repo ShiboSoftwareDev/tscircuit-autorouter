@@ -20,6 +20,7 @@ import {
 } from "@tscircuit/high-density-a01"
 import { FixedTopologyHighDensityIntraNodeSolver } from "../FixedTopologyHighDensityIntraNodeSolver"
 import { SingleLayerNoDifferentRootIntersectionsIntraNodeSolver } from "../HighDensitySolver/SingleLayerNoDifferentRootIntersectionsIntraNodeSolver"
+import { getCrossNetViaTraceOverlaps } from "lib/utils/getCrossNetViaTraceOverlaps"
 
 export class HyperSingleIntraNodeSolver extends HyperParameterSupervisorSolver<
   | IntraNodeRouteSolver
@@ -249,6 +250,35 @@ export class HyperSingleIntraNodeSolver extends HyperParameterSupervisorSolver<
     return 1 - (solver.progress || 0)
   }
 
+  private getRoutesFromSolvedSubSolver(
+    solver: SupervisedSolver<IntraNodeRouteSolver>,
+  ): HighDensityIntraNodeRoute[] {
+    if (
+      (solver.solver as any) instanceof HighDensitySolverA01 ||
+      (solver.solver as any) instanceof HighDensityA03Solver
+    ) {
+      return (solver.solver as any).getOutput()
+    }
+
+    return solver.solver.solvedRoutes
+  }
+
+  private invalidateSolverIfRoutesOverlap(
+    solver: SupervisedSolver<IntraNodeRouteSolver>,
+    routes: HighDensityIntraNodeRoute[],
+  ) {
+    const overlaps = getCrossNetViaTraceOverlaps(routes, this.connMap)
+    if (overlaps.length === 0) return false
+
+    solver.solver.solved = false
+    solver.solver.failed = true
+    solver.solver.error = `Produced ${overlaps.length} cross-net via-trace overlaps`
+    this.solved = false
+    this.winningSolver = undefined
+    this.solvedRoutes = []
+    return true
+  }
+
   generateSolver(hyperParameters: any): IntraNodeRouteSolver {
     if (hyperParameters.SINGLE_LAYER_NO_DIFFERENT_ROOT_INTERSECTIONS) {
       if (
@@ -352,15 +382,11 @@ export class HyperSingleIntraNodeSolver extends HyperParameterSupervisorSolver<
   }
 
   onSolve(solver: SupervisedSolver<IntraNodeRouteSolver>) {
-    let routes: HighDensityIntraNodeRoute[]
-    if (
-      (solver.solver as any) instanceof HighDensitySolverA01 ||
-      (solver.solver as any) instanceof HighDensityA03Solver
-    ) {
-      routes = (solver.solver as any).getOutput()
-    } else {
-      routes = solver.solver.solvedRoutes
+    const routes = this.getRoutesFromSolvedSubSolver(solver)
+    if (this.invalidateSolverIfRoutesOverlap(solver, routes)) {
+      return
     }
+
     this.solvedRoutes = routes.map((route) => {
       const matchingPortPoint = this.nodeWithPortPoints.portPoints.find(
         (p) => p.connectionName === route.connectionName,
