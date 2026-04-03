@@ -4,6 +4,7 @@ import { Obstacle } from "lib/types"
 import { HighDensityIntraNodeRoute } from "lib/types/high-density-types"
 import { combineVisualizations } from "lib/utils/combineVisualizations"
 import { createObjectsWithZLayers } from "lib/utils/createObjectsWithZLayers"
+import { getCrossNetViaTraceOverlapSignatures } from "lib/utils/getCrossNetViaTraceOverlaps"
 import { BaseSolver } from "../BaseSolver"
 import { SingleSimplifiedPathSolver } from "./SingleSimplifiedPathSolver"
 import { SingleSimplifiedPathSolver5 } from "./SingleSimplifiedPathSolver5_Deg45"
@@ -57,6 +58,36 @@ export class MultiSimplifiedPathSolver extends BaseSolver {
     this.simplifiedHdRoutes = []
   }
 
+  private getOtherHdRoutesForActiveSolver(): HighDensityIntraNodeRoute[] {
+    return this.unsimplifiedHdRoutes
+      .slice(this.currentUnsimplifiedHdRouteIndex)
+      .concat(this.simplifiedHdRoutes)
+  }
+
+  private introducesNewCrossNetViaTraceOverlaps(
+    originalRoute: HighDensityIntraNodeRoute,
+    simplifiedRoute: HighDensityIntraNodeRoute,
+  ): boolean {
+    const otherHdRoutes = this.getOtherHdRoutesForActiveSolver()
+
+    const overlapSignaturesBefore = getCrossNetViaTraceOverlapSignatures(
+      [originalRoute, ...otherHdRoutes],
+      this.connMap,
+    )
+    const overlapSignaturesAfter = getCrossNetViaTraceOverlapSignatures(
+      [simplifiedRoute, ...otherHdRoutes],
+      this.connMap,
+    )
+
+    for (const signature of overlapSignaturesAfter) {
+      if (!overlapSignaturesBefore.has(signature)) {
+        return true
+      }
+    }
+
+    return false
+  }
+
   _step() {
     const hdRoute =
       this.unsimplifiedHdRoutes[this.currentUnsimplifiedHdRouteIndex]
@@ -68,9 +99,7 @@ export class MultiSimplifiedPathSolver extends BaseSolver {
 
       this.activeSubSolver = new SingleSimplifiedPathSolver5({
         inputRoute: hdRoute,
-        otherHdRoutes: this.unsimplifiedHdRoutes
-          .slice(this.currentUnsimplifiedHdRouteIndex + 1)
-          .concat(this.simplifiedHdRoutes),
+        otherHdRoutes: this.getOtherHdRoutesForActiveSolver(),
         obstacles: this.obstacles,
         connMap: this.connMap,
         colorMap: this.colorMap,
@@ -82,7 +111,18 @@ export class MultiSimplifiedPathSolver extends BaseSolver {
 
     this.activeSubSolver.step()
     if (this.activeSubSolver.solved) {
-      this.simplifiedHdRoutes.push(this.activeSubSolver.simplifiedRoute)
+      const originalRoute =
+        this.unsimplifiedHdRoutes[this.currentUnsimplifiedHdRouteIndex - 1]
+      const simplifiedRoute = this.activeSubSolver.simplifiedRoute
+
+      this.simplifiedHdRoutes.push(
+        this.introducesNewCrossNetViaTraceOverlaps(
+          originalRoute,
+          simplifiedRoute,
+        )
+          ? originalRoute
+          : simplifiedRoute,
+      )
       this.activeSubSolver = null
     }
   }
