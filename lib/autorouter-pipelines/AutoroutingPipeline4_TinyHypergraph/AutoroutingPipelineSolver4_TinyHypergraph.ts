@@ -5,6 +5,7 @@ import type { GraphicsObject, Line } from "graphics-debug"
 import { getGlobalInMemoryCache } from "lib/cache/setupGlobalCaches"
 import { CacheProvider } from "lib/cache/types"
 import { MultiTargetNecessaryCrampedPortPointSolver } from "lib/solvers/NecessaryCrampedPortPointSolver/MultiTargetNecessaryCrampedPortPointSolver"
+import { EdgeCollapsedNodeSubdivisionSolver } from "lib/solvers/NodeDimensionSubdivisionSolver/EdgeCollapsedNodeSubdivisionSolver"
 import { NodeDimensionSubdivisionSolver } from "lib/solvers/NodeDimensionSubdivisionSolver/NodeDimensionSubdivisionSolver"
 import { buildHyperGraph } from "lib/solvers/PortPointPathingSolver/hgportpointpathingsolver"
 import { TinyHypergraphPortPointPathingSolver } from "lib/solvers/PortPointPathingSolver/tinyhypergraph/TinyHypergraphPortPointPathingSolver"
@@ -101,6 +102,8 @@ export class AutoroutingPipelineSolver4_TinyHypergraph extends BaseSolver {
   nodeSolver?: RectDiffPipeline
   nodeDimensionSubdivisionSolver?: NodeDimensionSubdivisionSolver
   nodeTargetMerger?: CapacityNodeTargetMerger
+  preEdgeCollapseEdgeSolver?: CapacityMeshEdgeSolver
+  edgeCollapseNodeSubdivisionSolver?: EdgeCollapsedNodeSubdivisionSolver
   edgeSolver?: CapacityMeshEdgeSolver
   colorMap: Record<string, string>
   highDensityRouteSolver?: HighDensitySolver
@@ -196,6 +199,26 @@ export class AutoroutingPipelineSolver4_TinyHypergraph extends BaseSolver {
         onSolved: (cms) => {
           cms.capacityNodes =
             cms.nodeDimensionSubdivisionSolver?.outputNodes ?? []
+        },
+      },
+    ),
+    definePipelineStep(
+      "preEdgeCollapseEdgeSolver",
+      CapacityMeshEdgeSolver2_NodeTreeOptimization,
+      (cms) => [cms.capacityNodes!],
+      {
+        onSolved: () => {},
+      },
+    ),
+    definePipelineStep(
+      "edgeCollapseNodeSubdivisionSolver",
+      EdgeCollapsedNodeSubdivisionSolver,
+      (cms) => [cms.capacityNodes!, cms.preEdgeCollapseEdgeSolver?.edges ?? []],
+      {
+        onSolved: (cms) => {
+          cms.capacityNodes =
+            cms.edgeCollapseNodeSubdivisionSolver?.outputNodes ??
+            cms.capacityNodes
         },
       },
     ),
@@ -516,6 +539,9 @@ export class AutoroutingPipelineSolver4_TinyHypergraph extends BaseSolver {
     const nodeTargetMergerViz = this.nodeTargetMerger?.visualize()
     const singleLayerNodeMergerViz = this.singleLayerNodeMerger?.visualize()
     const strawSolverViz = this.strawSolver?.visualize()
+    const preEdgeCollapseEdgeViz = this.preEdgeCollapseEdgeSolver?.visualize()
+    const edgeCollapseNodeSubdivisionViz =
+      this.edgeCollapseNodeSubdivisionSolver?.visualize()
     const edgeViz = this.edgeSolver?.visualize()
     const deadEndViz = this.deadEndSolver?.visualize()
     const availableSegmentPointViz =
@@ -600,6 +626,8 @@ export class AutoroutingPipelineSolver4_TinyHypergraph extends BaseSolver {
       nodeTargetMergerViz,
       singleLayerNodeMergerViz,
       strawSolverViz,
+      preEdgeCollapseEdgeViz,
+      edgeCollapseNodeSubdivisionViz,
       edgeViz,
       deadEndViz,
       availableSegmentPointViz,
