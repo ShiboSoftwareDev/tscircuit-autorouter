@@ -129,7 +129,7 @@ export class PolyHypergraphPortPointPathingSolver extends BaseSolver {
         layerCount: params.srj.layerCount,
         layerMergeMode: params.layerMergeMode ?? "same",
         useConstrainedDelaunay,
-        usePolyanyaMerge: params.usePolyanyaMerge ?? false,
+        usePolyanyaMerge: params.usePolyanyaMerge ?? true,
         viaSegments: params.viaSegments ?? 8,
       })
     const useConstrainedDelaunay = params.useConstrainedDelaunay ?? true
