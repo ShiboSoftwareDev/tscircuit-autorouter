@@ -288,6 +288,8 @@ export class PolyHypergraphPortPointPathingSolver extends BaseSolver {
         polygon,
         portPoints,
         availableZ: metadata.availableZ as number[] | undefined,
+        _containsObstacle: Boolean(metadata._containsObstacle),
+        _containsTarget: Boolean(metadata._containsTarget),
       })
     }
 

@@ -13,4 +13,7 @@ export type PolyNodeWithPortPoints = Omit<NodeWithPortPoints, "portPoints"> & {
   polygon: Point[]
   portPoints: PolyPortPoint[]
   projectedRect?: ProjectedRect
+  _containsObstacle?: boolean
+  _containsTarget?: boolean
+  coalescedCapacityMeshNodeIds?: string[]
 }

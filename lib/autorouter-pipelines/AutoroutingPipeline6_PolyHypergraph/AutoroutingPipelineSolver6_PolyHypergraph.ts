@@ -32,6 +32,7 @@ import { AttachProjectedRectsSolver } from "./AttachProjectedRectsSolver"
 import { PolyHighDensitySolver } from "./PolyHighDensitySolver"
 import { PolyHypergraphPortPointPathingSolver } from "./PolyHypergraphPortPointPathingSolver"
 import { ProjectHighDensityToPolygonSolver } from "./ProjectHighDensityToPolygonSolver"
+import { coalescePolyHighDensityNodes } from "./coalescePolyHighDensityNodes"
 import type { PolyNodeWithPortPoints } from "./types"
 
 interface CapacityMeshSolverOptions {
@@ -166,8 +167,10 @@ export class AutoroutingPipelineSolver6_PolyHypergraph extends BaseSolver {
       ],
       {
         onSolved: (cms) => {
-          cms.highDensityNodePortPoints =
-            cms.polyGraphSolver?.getOutput().nodesWithPortPoints ?? []
+          cms.highDensityNodePortPoints = coalescePolyHighDensityNodes(
+            cms.polyGraphSolver?.getOutput().nodesWithPortPoints ?? [],
+            cms.polyGraphSolver?.serializedGraph,
+          )
         },
       },
     ),

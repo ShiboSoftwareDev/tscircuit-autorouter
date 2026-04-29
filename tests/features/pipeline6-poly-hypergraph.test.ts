@@ -10,6 +10,7 @@ import {
   isPointInConvexPolygon,
   projectPointToRectBoundary,
 } from "lib/autorouter-pipelines/AutoroutingPipeline6_PolyHypergraph/geometry"
+import { coalescePolyHighDensityNodes } from "lib/autorouter-pipelines/AutoroutingPipeline6_PolyHypergraph/coalescePolyHighDensityNodes"
 import type { PolyNodeWithPortPoints } from "lib/autorouter-pipelines/AutoroutingPipeline6_PolyHypergraph/types"
 import type { SimpleRouteJson } from "lib/types"
 import { convertSrjToGraphicsObject } from "lib/utils/convertSrjToGraphicsObject"
@@ -18,6 +19,34 @@ import { loadScenarios } from "scripts/benchmark/scenarios"
 const expectClose = (actual: number, expected: number, tolerance = 1e-6) => {
   expect(Math.abs(actual - expected)).toBeLessThanOrEqual(tolerance)
 }
+
+const createPolyNode = (
+  capacityMeshNodeId: string,
+  polygon: Array<{ x: number; y: number }>,
+  opts: Partial<PolyNodeWithPortPoints> = {},
+): PolyNodeWithPortPoints => ({
+  capacityMeshNodeId,
+  center: {
+    x:
+      (Math.min(...polygon.map((point) => point.x)) +
+        Math.max(...polygon.map((point) => point.x))) /
+      2,
+    y:
+      (Math.min(...polygon.map((point) => point.y)) +
+        Math.max(...polygon.map((point) => point.y))) /
+      2,
+  },
+  width:
+    Math.max(...polygon.map((point) => point.x)) -
+    Math.min(...polygon.map((point) => point.x)),
+  height:
+    Math.max(...polygon.map((point) => point.y)) -
+    Math.min(...polygon.map((point) => point.y)),
+  polygon,
+  portPoints: [],
+  availableZ: [0],
+  ...opts,
+})
 
 test("Pipeline6 projectedRect area expansion preserves center and reaches polygon area", () => {
   const rotatedSquare = [
@@ -103,6 +132,109 @@ test("Pipeline6 defaults projectedRect area expansion above equivalent area", ()
   expect(solver.equivalentAreaExpansionFactor).toBe(2)
 })
 
+test("Pipeline6 coalesces adjacent convex free high-density nodes", () => {
+  const left = createPolyNode("free-1", [
+    { x: 0, y: 0 },
+    { x: 1, y: 0 },
+    { x: 1, y: 1 },
+    { x: 0, y: 1 },
+  ])
+  const right = createPolyNode("free-2", [
+    { x: 1, y: 0 },
+    { x: 2, y: 0 },
+    { x: 2, y: 1 },
+    { x: 1, y: 1 },
+  ])
+
+  const [merged] = coalescePolyHighDensityNodes([left, right])
+
+  expect(merged?.capacityMeshNodeId).toBe("free-1+free-2")
+  expect(merged?.width).toBe(2)
+  expect(merged?.height).toBe(1)
+  expect(merged?.polygon).toHaveLength(4)
+  expect(merged?.coalescedCapacityMeshNodeIds).toEqual(["free-1", "free-2"])
+})
+
+test("Pipeline6 coalescer rejects non-convex L-shaped unions", () => {
+  const bottom = createPolyNode("free-1", [
+    { x: 0, y: 0 },
+    { x: 2, y: 0 },
+    { x: 2, y: 1 },
+    { x: 0, y: 1 },
+  ])
+  const upperLeft = createPolyNode("free-2", [
+    { x: 0, y: 1 },
+    { x: 1, y: 1 },
+    { x: 1, y: 2 },
+    { x: 0, y: 2 },
+  ])
+
+  expect(coalescePolyHighDensityNodes([bottom, upperLeft])).toHaveLength(2)
+})
+
+test("Pipeline6 coalescer rejects incompatible node metadata", () => {
+  const base = createPolyNode("free-1", [
+    { x: 0, y: 0 },
+    { x: 1, y: 0 },
+    { x: 1, y: 1 },
+    { x: 0, y: 1 },
+  ])
+  const differentLayer = createPolyNode(
+    "free-2",
+    [
+      { x: 1, y: 0 },
+      { x: 2, y: 0 },
+      { x: 2, y: 1 },
+      { x: 1, y: 1 },
+    ],
+    { availableZ: [1] },
+  )
+  const obstacle = createPolyNode(
+    "free-3",
+    [
+      { x: 1, y: 0 },
+      { x: 2, y: 0 },
+      { x: 2, y: 1 },
+      { x: 1, y: 1 },
+    ],
+    { _containsObstacle: true },
+  )
+  const target = createPolyNode(
+    "free-4",
+    [
+      { x: 1, y: 0 },
+      { x: 2, y: 0 },
+      { x: 2, y: 1 },
+      { x: 1, y: 1 },
+    ],
+    { _containsTarget: true },
+  )
+
+  expect(coalescePolyHighDensityNodes([base, differentLayer])).toHaveLength(2)
+  expect(coalescePolyHighDensityNodes([base, obstacle])).toHaveLength(2)
+  expect(coalescePolyHighDensityNodes([base, target])).toHaveLength(2)
+})
+
+test("Pipeline6 coalescer detects partial collinear shared edges", () => {
+  const splitEdge = createPolyNode("free-1", [
+    { x: 0, y: 0 },
+    { x: 1, y: 0 },
+    { x: 1, y: 0.5 },
+    { x: 1, y: 1 },
+    { x: 0, y: 1 },
+  ])
+  const partial = createPolyNode("free-2", [
+    { x: 1, y: 0 },
+    { x: 2, y: 0 },
+    { x: 2, y: 1 },
+    { x: 1, y: 1 },
+  ])
+
+  const [merged] = coalescePolyHighDensityNodes([splitEdge, partial])
+
+  expect(merged?.capacityMeshNodeId).toBe("free-1+free-2")
+})
+
 test("Pipeline6 falls back when constrained triangulation fails", async () => {
   const scenarios = await loadScenarios("dataset01")
   const circuit100 = scenarios.find(([name]) => name === "circuit100")?.[1]
@@ -114,6 +246,21 @@ test("Pipeline6 falls back when constrained triangulation fails", async () => {
 
   expect(solver.usedUnconstrainedDelaunayFallback).toBe(true)
   expect(solver.convexRegions.regions.length).toBeGreaterThan(0)
+})
+
+test("Pipeline6 solves dataset01 circuit002 with projected rect expansion and coalescing", async () => {
+  const scenarios = await loadScenarios("dataset01")
+  const circuit002 = scenarios.find(([name]) => name === "circuit002")?.[1]
+  expect(circuit002).toBeDefined()
+
+  const solver = new AutoroutingPipelineSolver6(circuit002!, {
+    effort: 1,
+    equivalentAreaExpansionFactor: 2,
+  })
+  solver.solve()
+
+  expect(solver.solved).toBe(true)
+  expect(solver.failed).toBe(false)
 })
 
 test("PolySingleIntraNodeSolver solves in rect space before projection back to polygon", () => {
