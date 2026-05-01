@@ -22,7 +22,8 @@ type ProjectedPortRecord = {
 
 type ProjectionAttempt = {
   label: string
-  projectedRect: ProjectedRect
+  getProjectedRect: () => ProjectedRect
+  projectedRect?: ProjectedRect
   effort: number | undefined
 }
 
@@ -74,36 +75,43 @@ export class PolySingleIntraNodeSolver extends BaseSolver {
     return [
       {
         label: "initial",
-        projectedRect: node.projectedRect!,
+        getProjectedRect: () => node.projectedRect!,
         effort: baseEffort,
       },
       ...[1, 4, 8].map((equivalentAreaExpansionFactor) => ({
         label: `equivalent-area-${equivalentAreaExpansionFactor}`,
-        projectedRect: computeProjectedRect(
-          node.polygon,
-          equivalentAreaExpansionFactor,
-          minProjectedRectDimension,
-        ),
+        getProjectedRect: () =>
+          computeProjectedRect(
+            node.polygon,
+            equivalentAreaExpansionFactor,
+            minProjectedRectDimension,
+          ),
         effort: baseEffort,
       })),
       {
         label: "initial-effort-x2",
-        projectedRect: node.projectedRect!,
+        getProjectedRect: () => node.projectedRect!,
         effort: (baseEffort ?? 1) * 2,
       },
     ]
   }
 
+  private getProjectedRectForAttempt(attempt: ProjectionAttempt) {
+    attempt.projectedRect ??= attempt.getProjectedRect()
+    return attempt.projectedRect
+  }
+
   private getNodeForProjectionAttempt(
     attempt: ProjectionAttempt,
   ): PolyNodeWithPortPoints {
+    const projectedRect = this.getProjectedRectForAttempt(attempt)
     return {
       ...this.params.nodeWithPortPoints,
-      center: attempt.projectedRect.center,
-      width: attempt.projectedRect.width,
-      height: attempt.projectedRect.height,
+      center: projectedRect.center,
+      width: projectedRect.width,
+      height: projectedRect.height,
       portPoints: this.params.nodeWithPortPoints.portPoints,
-      projectedRect: attempt.projectedRect,
+      projectedRect,
     }
   }
 
@@ -146,7 +154,8 @@ export class PolySingleIntraNodeSolver extends BaseSolver {
       effort: attempt.effort,
     })
     this.activeSubSolver = this.highDensitySolver
-    this.MAX_ITERATIONS = this.highDensitySolver.MAX_ITERATIONS + 1_000
+    this.MAX_ITERATIONS =
+      this.iterations + this.highDensitySolver.MAX_ITERATIONS + 1_000
   }
 
   _step() {
