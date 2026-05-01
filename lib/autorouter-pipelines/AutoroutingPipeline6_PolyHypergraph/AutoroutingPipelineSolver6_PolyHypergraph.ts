@@ -210,8 +210,16 @@ export class AutoroutingPipelineSolver6_PolyHypergraph extends BaseSolver {
           traceWidth: cms.minTraceWidth,
           obstacleMargin: cms.srj.defaultObstacleMargin ?? 0.15,
           effort: cms.effort,
+          minProjectedRectDimension: cms.minProjectedRectDimension,
         },
       ],
+      {
+        onSolved: (cms) => {
+          cms.projectedHighDensityNodePortPoints =
+            cms.highDensityRouteSolver?.nodePortPoints ??
+            cms.projectedHighDensityNodePortPoints
+        },
+      },
     ),
     definePipelineStep(
       "projectHighDensityToPolgonSolver",
