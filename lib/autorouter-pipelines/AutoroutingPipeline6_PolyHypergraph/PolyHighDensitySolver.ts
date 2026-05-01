@@ -27,6 +27,7 @@ export class PolyHighDensitySolver extends BaseSolver {
   traceWidth: number
   obstacleMargin: number
   effort: number
+  minProjectedRectDimension?: number
   nodePfById: Map<CapacityMeshNodeId, number | null>
 
   constructor({
@@ -37,6 +38,7 @@ export class PolyHighDensitySolver extends BaseSolver {
     traceWidth,
     obstacleMargin,
     effort,
+    minProjectedRectDimension,
     nodePfById,
   }: {
     nodePortPoints: PolyNodeWithPortPoints[]
@@ -46,6 +48,7 @@ export class PolyHighDensitySolver extends BaseSolver {
     traceWidth?: number
     obstacleMargin?: number
     effort?: number
+    minProjectedRectDimension?: number
     nodePfById?:
       | Map<CapacityMeshNodeId, number | null>
       | Record<string, number | null>
@@ -59,6 +62,7 @@ export class PolyHighDensitySolver extends BaseSolver {
     this.traceWidth = traceWidth ?? 0.15
     this.obstacleMargin = obstacleMargin ?? 0.15
     this.effort = effort ?? 1
+    this.minProjectedRectDimension = minProjectedRectDimension
     this.MAX_ITERATIONS = 10e6 * this.effort
     this.nodePfById =
       nodePfById instanceof Map
@@ -73,6 +77,12 @@ export class PolyHighDensitySolver extends BaseSolver {
         const nodeId =
           this.activeSubSolver.params.nodeWithPortPoints.capacityMeshNodeId
         const routes = this.activeSubSolver.solvedRoutes
+        const solvedNode =
+          this.activeSubSolver.solvedNodeWithPortPoints ??
+          this.activeSubSolver.params.nodeWithPortPoints
+        this.nodePortPoints = this.nodePortPoints.map((node) =>
+          node.capacityMeshNodeId === nodeId ? solvedNode : node,
+        )
         this.routesByNodeId.set(nodeId, [
           ...(this.routesByNodeId.get(nodeId) ?? []),
           ...routes,
@@ -109,6 +119,7 @@ export class PolyHighDensitySolver extends BaseSolver {
       traceWidth: this.traceWidth,
       obstacleMargin: this.obstacleMargin,
       effort: this.effort,
+      minProjectedRectDimension: this.minProjectedRectDimension,
     })
   }
 
@@ -137,6 +148,7 @@ export class PolyHighDensitySolver extends BaseSolver {
         traceWidth: this.traceWidth,
         obstacleMargin: this.obstacleMargin,
         effort: this.effort,
+        minProjectedRectDimension: this.minProjectedRectDimension,
         nodePfById: this.nodePfById,
       },
     ] as const
