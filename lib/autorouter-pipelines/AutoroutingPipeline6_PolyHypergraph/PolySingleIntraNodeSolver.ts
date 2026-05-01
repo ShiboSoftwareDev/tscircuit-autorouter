@@ -68,7 +68,8 @@ export class PolySingleIntraNodeSolver extends BaseSolver {
     const baseEffort = this.params.effort
     const node = this.params.nodeWithPortPoints
     const minProjectedRectDimension =
-      this.params.minProjectedRectDimension ?? (this.params.traceWidth ?? 0.15) * 3
+      this.params.minProjectedRectDimension ??
+      (this.params.traceWidth ?? 0.15) * 3
 
     return [
       {
