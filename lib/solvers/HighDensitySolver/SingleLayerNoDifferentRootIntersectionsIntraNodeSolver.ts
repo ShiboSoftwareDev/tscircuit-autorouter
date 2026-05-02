@@ -9,6 +9,7 @@ import type {
   NodeWithPortPoints,
   PortPoint,
 } from "lib/types/high-density-types"
+import { getIntraNodeCrossings } from "lib/utils/getIntraNodeCrossings"
 import { BaseSolver } from "../BaseSolver"
 
 type Point3 = { x: number; y: number; z: number }
@@ -49,15 +50,6 @@ const dedupePoints = <T extends Point2>(points: T[]) => {
     deduped.push(point)
   }
   return deduped
-}
-
-const uniqueAvailableZ = (node: NodeWithPortPoints) => {
-  if (node.availableZ?.length) {
-    return [...new Set(node.availableZ)].sort((a, b) => a - b)
-  }
-  return [...new Set(node.portPoints.map((p) => p.z ?? 0))].sort(
-    (a, b) => a - b,
-  )
 }
 
 const getBounds = (node: NodeWithPortPoints) => ({
@@ -427,8 +419,8 @@ export class SingleLayerNoDifferentRootIntersectionsIntraNodeSolver extends Base
   }
 
   static isApplicable(node: NodeWithPortPoints) {
-    const availableZ = uniqueAvailableZ(node)
-    if (availableZ.length !== 1) return false
+    const usedZ = [...new Set(node.portPoints.map((point) => point.z ?? 0))]
+    if (usedZ.length !== 1) return false
     if (node.portPoints.length > 12) return false
 
     const bounds = getBounds(node)
@@ -444,7 +436,16 @@ export class SingleLayerNoDifferentRootIntersectionsIntraNodeSolver extends Base
       )
     }
 
-    return [...pointCountByConnection.values()].some((count) => count > 2)
+    if ([...pointCountByConnection.values()].some((count) => count > 2)) {
+      return true
+    }
+
+    const crossings = getIntraNodeCrossings(node)
+    return (
+      crossings.numSameLayerCrossings === 0 &&
+      crossings.numEntryExitLayerChanges === 0 &&
+      crossings.numTransitionPairCrossings === 0
+    )
   }
 
   private buildTaskGroups() {
