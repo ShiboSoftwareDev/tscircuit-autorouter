@@ -8,6 +8,7 @@ import type {
 } from "lib/types/high-density-types"
 import type { SimpleRouteJson } from "lib/types"
 import { HighDensityForceImproveSolver } from "high-density-repair01/lib/HighDensityForceImproveSolver"
+import repro117 from "../fixtures/repro/repro117-standalone-simple-route.json"
 
 const srj: SimpleRouteJson = {
   layerCount: 2,
@@ -140,6 +141,43 @@ test("pipeline4 repair stage consumes force-improved routes", () => {
 
   expect(repairParams.hdRoutes).toEqual([improvedRoute])
 })
+
+test(
+  "pipeline4 force-improve and repair preserve repro117 terminal endpoint",
+  () => {
+    const solver = new AutoroutingPipelineSolver4(
+      structuredClone(repro117) as SimpleRouteJson,
+    )
+
+    solver.solve()
+
+    expect(solver.solved).toBe(true)
+    expect(solver.failed).toBe(false)
+
+    const connection = solver.srjWithPointPairs?.connections.find(
+      (conn) => conn.name === "source_net_1_mst3",
+    )
+    const terminalPoint = connection?.pointsToConnect.find(
+      (point) => point.pointId === "pcb_port_106",
+    )
+    expect(terminalPoint).toBeDefined()
+
+    const repairedRoutes = solver.highDensityRepairSolver?.getOutput() ?? []
+    const routeTouchesTerminal = repairedRoutes.some((route) => {
+      if (route.connectionName !== "source_net_1_mst3") return false
+      const endpoints = [route.route[0], route.route.at(-1)]
+      return endpoints.some(
+        (endpoint) =>
+          endpoint &&
+          Math.abs(endpoint.x - terminalPoint!.x) < 1e-9 &&
+          Math.abs(endpoint.y - terminalPoint!.y) < 1e-9,
+      )
+    })
+
+    expect(routeTouchesTerminal).toBe(true)
+  },
+  { timeout: 60_000 },
+)
 
 test("pipeline4 stitch stage consumes repaired high density routes", () => {
   const rawRoute: HighDensityRoute = {
