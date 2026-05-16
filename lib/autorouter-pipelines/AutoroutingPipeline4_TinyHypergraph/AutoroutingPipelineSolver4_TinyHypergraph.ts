@@ -65,6 +65,8 @@ interface CapacityMeshSolverOptions {
 }
 export type AutoroutingPipelineSolverOptions = CapacityMeshSolverOptions
 
+const MIN_TINY_HYPERGRAPH_PORT_POINT_PATHING_EFFORT = 3
+
 type PipelineStep<T extends new (...args: any[]) => BaseSolver> = {
   solverName: string
   solverClass: T
@@ -271,7 +273,10 @@ export class AutoroutingPipelineSolver4_TinyHypergraph extends BaseSolver {
             graph,
             connections,
             layerCount: cms.srj.layerCount,
-            effort: cms.effort,
+            effort: Math.max(
+              cms.effort,
+              MIN_TINY_HYPERGRAPH_PORT_POINT_PATHING_EFFORT,
+            ),
             minViaPadDiameter: cms.viaDiameter,
             flags: {
               FORCE_CENTER_FIRST: true,
