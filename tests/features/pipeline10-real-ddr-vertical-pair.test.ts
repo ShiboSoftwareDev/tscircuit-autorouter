@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { sample001 } from "@tscircuit/dataset-srj29-ddr3-bga-pairs"
 import type { GraphicsObject } from "graphics-debug"
 import { AutoroutingPipelineSolver10_BgaFanout } from "lib/autorouter-pipelines/AutoroutingPipeline10_BgaFanout/AutoroutingPipelineSolver10_BgaFanout"
-import type { SimpleRouteJson } from "lib/types"
+import type { ConnectionPoint, SimpleRouteJson } from "lib/types"
 import { convertSrjToGraphicsObject } from "lib/utils/convertSrjToGraphicsObject"
 import { getGraphicsSvgFrames } from "../fixtures/solver-svg-frames"
 
@@ -99,7 +99,41 @@ function addRealDdrContext(
   }
 }
 
-test("Pipeline 10 reproduces vertical placement failure on a real DDR3 BGA pair", async () => {
+function pointIsInsideComponent(
+  point: ConnectionPoint,
+  componentId: string,
+  inputSrj: SimpleRouteJson,
+): boolean {
+  const componentObstacles = inputSrj.obstacles.filter(
+    (obstacle) => obstacle.componentId === componentId,
+  )
+  const minX = Math.min(
+    ...componentObstacles.map(
+      (obstacle) => obstacle.center.x - obstacle.width / 2,
+    ),
+  )
+  const maxX = Math.max(
+    ...componentObstacles.map(
+      (obstacle) => obstacle.center.x + obstacle.width / 2,
+    ),
+  )
+  const minY = Math.min(
+    ...componentObstacles.map(
+      (obstacle) => obstacle.center.y - obstacle.height / 2,
+    ),
+  )
+  const maxY = Math.max(
+    ...componentObstacles.map(
+      (obstacle) => obstacle.center.y + obstacle.height / 2,
+    ),
+  )
+
+  return (
+    point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY
+  )
+}
+
+test("Pipeline 10 fans out a real vertical DDR3 BGA pair", async () => {
   const inputSrj = rotateSampleCounterclockwise(sample001 as SimpleRouteJson)
   const metadata = sample001.metadata as unknown as Srj29Metadata
 
@@ -118,9 +152,10 @@ test("Pipeline 10 reproduces vertical placement failure on a real DDR3 BGA pair"
   ).toHaveLength(metadata.controller.padCount)
 
   const pipeline = new AutoroutingPipelineSolver10_BgaFanout(inputSrj)
-  expect(() => pipeline.solveUntilStage("autoroutingPipelineSolver")).toThrow(
-    "Pipeline 10 cannot provide 2mm fanout margins while retaining a 2mm routing corridor",
-  )
+  pipeline.solveUntilStage("autoroutingPipelineSolver")
+
+  expect(pipeline.failed).toBe(false)
+  expect(pipeline.getCurrentStageName()).toBe("autoroutingPipelineSolver")
 
   const detectedBgaIds = pipeline
     .componentDetectionSolver!.getOutput()
@@ -130,23 +165,47 @@ test("Pipeline 10 reproduces vertical placement failure on a real DDR3 BGA pair"
   expect(detectedBgaIds).toEqual(
     [metadata.controller.componentId, metadata.ddr3.componentId].sort(),
   )
+  expect(pipeline.firstBgaFanoutSolver!.getOutput().validation.valid).toBe(true)
+  expect(pipeline.secondBgaFanoutSolver!.getOutput().validation.valid).toBe(
+    true,
+  )
 
-  const inputGraphics = addRealDdrContext(
-    convertSrjToGraphicsObject(inputSrj, { traceColorMode: "net" }),
-    inputSrj,
+  const fannedOutSrj =
+    pipeline.secondBgaFanoutSolver!.getOutputSimpleRouteJson()
+  expect(fannedOutSrj.connections).toHaveLength(inputSrj.connections.length)
+  expect(fannedOutSrj.traces!.length).toBeGreaterThanOrEqual(
+    inputSrj.connections.length * 2,
+  )
+  for (const connection of fannedOutSrj.connections) {
+    expect(
+      connection.pointsToConnect.every(
+        (point) =>
+          !pointIsInsideComponent(point, metadata.ddr3.componentId, inputSrj) &&
+          !pointIsInsideComponent(
+            point,
+            metadata.controller.componentId,
+            inputSrj,
+          ),
+      ),
+    ).toBe(true)
+  }
+
+  const outputGraphics = addRealDdrContext(
+    convertSrjToGraphicsObject(fannedOutSrj, { traceColorMode: "net" }),
+    fannedOutSrj,
     metadata,
   )
   await expect(
     getGraphicsSvgFrames({
       frames: [
         {
-          name: "REPRO • Pipeline 10 rejects this vertical DDR3 pair",
+          name: "FIXED • Pipeline 10 fans out both vertical DDR3 BGAs",
           pipeline: "end",
-          graphics: inputGraphics,
+          graphics: outputGraphics,
         },
       ],
       columns: 1,
       backgroundColor: "white",
     }),
   ).toMatchSvgSnapshot(import.meta.path)
-})
+}, 60_000)
